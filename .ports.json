@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-01-11T13:27:55.984Z",
+  "ports": {
+    "backend": 8000,
+    "frontend": 3001
+  },
+  "portInfo": {
+    "backend": {
+      "port": 8000,
+      "status": "occupied",
+      "pid": "4288",
+      "processes": 1
+    },
+    "frontend": {
+      "port": 3001,
+      "status": "occupied",
+      "pid": "9256",
+      "processes": 2
+    }
+  },
+  "lastCheck": 1768138075984,
+  "allFree": false
+}
