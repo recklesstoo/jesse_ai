@@ -382,6 +382,13 @@ function ToastContainer({ toasts }) {
 
 export default function App() {
   const [connected, setConnected] = useState(false);
+  const [feedState, setFeedState] = useState({
+    feed_status: "NO_FEED",
+    ws_connected: false,
+    last_bar_ts_utc: null,
+    bar_age_sec: null,
+    monitor_age_sec: null
+  });
   const [healthOk, setHealthOk] = useState(false);
   const [shadowMode, setShadowMode] = useState(false);
   const [shadowDecisions, setShadowDecisions] = useState([]);
@@ -548,6 +555,52 @@ export default function App() {
     };
     barFlushRef.current = setInterval(flushBar, PRICE_REFRESH_MS);
     return () => clearInterval(barFlushRef.current);
+  }, []);
+
+  useEffect(() => {
+    const pollState = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/state?botId=${BOT_ID}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setFeedState(data);
+
+        setBar((prev) => {
+          const nextTs = data.last_bar_ts_utc;
+          if (!nextTs) {
+            if (data.feed_status === "NO_FEED" && !prev.timestamp) {
+              return {
+                ...prev,
+                price: null,
+                ohlc: { open: null, high: null, low: null, close: null },
+                volume: null,
+                timestamp: null
+              };
+            }
+            return prev;
+          }
+
+          const prevTime = prev.timestamp ? new Date(prev.timestamp).getTime() : 0;
+          const nextTime = new Date(nextTs).getTime();
+          if (!Number.isFinite(nextTime) || nextTime <= prevTime) return prev;
+
+          return {
+            ...prev,
+            symbol: data.last_symbol || prev.symbol,
+            price: data.last_price ?? prev.price,
+            ohlc: data.last_ohlc || prev.ohlc,
+            volume: data.last_volume ?? prev.volume,
+            timestamp: nextTs
+          };
+        });
+      } catch (err) {
+        // Ignore state polling failures.
+      }
+    };
+
+    pollState();
+    const timer = setInterval(pollState, 1000);
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -968,8 +1021,20 @@ export default function App() {
     if (!botMetrics || botMetrics.bar_interval_ms === null || botMetrics.bar_interval_ms === undefined) return null;
     return Math.round(botMetrics.bar_interval_ms);
   }, [botMetrics]);
-  const feedAgeSec = monitorBarAgeSec !== null ? monitorBarAgeSec : barAgeSec;
-  const activityOk = feedAgeSec !== null && feedAgeSec <= 1;
+  const feedAgeSec = useMemo(() => {
+    const stateAge = feedState?.bar_age_sec;
+    if (stateAge !== null && stateAge !== undefined) return Math.max(0, Math.round(Number(stateAge)));
+    return monitorBarAgeSec !== null ? monitorBarAgeSec : barAgeSec;
+  }, [feedState?.bar_age_sec, monitorBarAgeSec, barAgeSec]);
+
+  const feedStaleThresholdSec = useMemo(() => {
+    const value = feedState?.feed_stale_threshold_sec;
+    if (value !== null && value !== undefined) return Math.max(3, Math.round(Number(value)));
+    if (barIntervalMs) return Math.max(3, Math.round((barIntervalMs / 1000) * 1.5 + 1));
+    return 3;
+  }, [feedState?.feed_stale_threshold_sec, barIntervalMs]);
+
+  const activityOk = feedState?.feed_status === "LIVE" && feedAgeSec !== null && feedAgeSec <= feedStaleThresholdSec;
   const strategyOk = strategyMonitorAgeSec !== null && strategyMonitorAgeSec <= 10;
   const wsAgeSec = useMemo(() => {
     if (!lastWsAt) return null;
@@ -1136,6 +1201,9 @@ export default function App() {
           </button>
         </div>
       </header>
+      {feedState.feed_status !== "LIVE" && !bar.timestamp && (
+        <div className="error-banner">WAITING FOR NINJATRADER DATA (BridgePuppet)</div>
+      )}
       {activeError && <div className="error-banner">{activeError}</div>}
       {activeError && (
         <div className="error-panel">
@@ -1152,8 +1220,8 @@ export default function App() {
         <section className="card price-card">
           <div className="card-header">
             <span className="label">SYMBOL</span>
-            <span className={`status-dot ${bar.price ? "ok" : "warn"}`}>
-              {bar.price ? "LIVE" : "WAITING"}
+            <span className={`status-dot ${feedState.feed_status === "LIVE" ? "ok" : "warn"}`}>
+              {feedState.feed_status === "LIVE" ? "LIVE" : bar.timestamp ? "STALE" : "WAITING FOR NINJA"}
             </span>
           </div>
           <div className="price-row">

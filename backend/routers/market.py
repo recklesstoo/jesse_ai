@@ -37,6 +37,8 @@ from backend.state import (
     _iso,
     _update_log_event,
     bot_state,
+    compute_feed_status,
+    AI_MIN_LIVE_BARS,
     state_lock,
     ws_bots,
 )
@@ -169,18 +171,42 @@ async def commands_queue(bot_id: str, wait_ms: int = Query(0)) -> Dict[str, Any]
 @router.get("/api/v1/ai-signals")
 async def ai_signals(botId: str = Query(..., alias="botId")) -> AISignalOut:
     async with state_lock:
+        feed = compute_feed_status(botId)
         state = _get_bot_state(botId)
-        sig = state.get("ai_signal")
-        if not sig:
+        if feed["feed_status"] != "LIVE":
             now = _iso(datetime.utcnow())
             sig = {
                 "signal": "NONE",
                 "bias": "NEUTRAL",
                 "confidence": 0.0,
-                "explain": "No data yet.",
+                "explain": "NO DATA: waiting for NinjaTrader feed.",
                 "updatedAt": now,
-                "barTs": None,
+                "barTs": feed.get("last_bar_ts_utc"),
             }
+        else:
+            live_count = int(state.get("live_bar_count") or 0)
+            if live_count < AI_MIN_LIVE_BARS:
+                now = _iso(datetime.utcnow())
+                sig = {
+                    "signal": "NONE",
+                    "bias": "NEUTRAL",
+                    "confidence": 0.0,
+                    "explain": f"Collecting live bars from NinjaTrader (need >= {AI_MIN_LIVE_BARS}, have {live_count}).",
+                    "updatedAt": now,
+                    "barTs": feed.get("last_bar_ts_utc"),
+                }
+                return {"ok": True, **sig}
+            sig = state.get("ai_signal")
+            if not sig:
+                now = _iso(datetime.utcnow())
+                sig = {
+                    "signal": "NONE",
+                    "bias": "NEUTRAL",
+                    "confidence": 0.0,
+                    "explain": f"Collecting live bars from NinjaTrader (need >= {AI_MIN_LIVE_BARS}).",
+                    "updatedAt": now,
+                    "barTs": feed.get("last_bar_ts_utc"),
+                }
     return {"ok": True, **sig}
 
 
@@ -201,8 +227,9 @@ async def strategy_state(botId: str = Query(..., alias="botId")) -> Dict[str, An
 @router.get("/api/v1/state")
 async def api_state(botId: str = Query("bot-1", alias="botId")) -> Dict[str, Any]:
     async with state_lock:
+        feed = compute_feed_status(botId)
         snapshot = dict(_get_bot_state(botId))
-    return {"ok": True, "state": snapshot}
+    return {"ok": True, **feed, "state": snapshot}
 
 
 @router.get("/api/v1/signals/latest")

@@ -13,6 +13,7 @@ from backend.database import get_db
 from backend.models import AISignal, Bar, MonitorSnapshot, TradeEvent
 from backend.services.ml_service import ml_service
 from backend.state import (
+    AI_MIN_LIVE_BARS,
     _append_log,
     _broadcast_live,
     _get_bot_state,
@@ -140,6 +141,8 @@ def _save_trade_event_sync(bot_id: str, payload: Dict[str, Any]) -> None:
 
 async def _run_inference_and_update(bot_id: str, payload: Dict[str, Any]) -> None:
     loop = asyncio.get_running_loop()
+    if _get_bot_state(bot_id).get("live_bar_count", 0) < AI_MIN_LIVE_BARS:
+        return
 
     def _infer():
         db = _open_db()
@@ -269,6 +272,7 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
         except Exception:
             ts_dt = None
     symbol = payload.get("symbol") or "MNQ"
+    timeframe = payload.get("timeframe")
     o = _safe_float(payload.get("open"))
     h = _safe_float(payload.get("high"))
     l = _safe_float(payload.get("low"))
@@ -290,9 +294,12 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
         state["last_ohlc"] = {"open": o, "high": h, "low": l, "close": c}
         state["last_volume"] = vol
         state["instrument"] = symbol
+        if timeframe:
+            state["timeframe"] = timeframe
         state["sessionBarCount"] = payload.get("sessionBarCount", state.get("sessionBarCount"))
         state["last_vwap"] = payload.get("vwap")
         state["vol_ok"] = payload.get("volOk")
+        state["live_bar_count"] = int(state.get("live_bar_count") or 0) + 1
         recent_bars = bars_store.setdefault(bot_id, [])
         recent_bars.append(payload.copy())
         if len(recent_bars) > MAX_BARS_CACHE:

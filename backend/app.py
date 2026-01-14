@@ -10,7 +10,6 @@ from backend.config import init_shadow_db
 from backend.database import Base, engine
 from backend.routers.health import router as health_router
 from backend.routers.market import router as market_router
-from backend.services.sim_feed import start_sim_tasks
 from backend.ws.server import (
     compute_wyckoff_signal as _compute_wyckoff_signal,
     ws_bot,
@@ -57,21 +56,6 @@ app.include_router(market_router)
 async def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     init_shadow_db()
-    stop_event = asyncio.Event()
-    app.state.sim_stop_event = stop_event
-    app.state.sim_tasks = start_sim_tasks(stop_event)
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    stop_event = getattr(app.state, "sim_stop_event", None)
-    if stop_event is not None:
-        stop_event.set()
-    tasks = getattr(app.state, "sim_tasks", []) or []
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
 
 app.websocket("/ws/live")(ws_live)
 app.websocket("/ws/{bot_id}")(ws_bot)

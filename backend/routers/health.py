@@ -82,11 +82,21 @@ async def monitor_status(botId: str = Query(..., alias="botId")) -> Dict[str, An
             except Exception:
                 monitor_age = None
 
+        interval_ms = state.get("bar_interval_ms")
+        bar_threshold = 3.0
+        if interval_ms is not None:
+            try:
+                interval_sec = max(0.0, float(interval_ms) / 1000.0)
+                if interval_sec > 0:
+                    bar_threshold = max(bar_threshold, interval_sec * 1.5 + 1.0)
+            except Exception:
+                pass
+
         ok = bool(
             last_bar_age is not None
-            and last_bar_age <= 1.5
+            and last_bar_age <= bar_threshold
             and monitor_age is not None
-            and monitor_age <= 15
+            and monitor_age <= 30
         )
 
         return {

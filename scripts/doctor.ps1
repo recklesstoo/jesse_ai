@@ -196,26 +196,43 @@ function Invoke-FrontendCheck {
     return $false
 }
 
-function Invoke-FeedCheck {
-    param([int]$Retries = 30, [int]$DelayMs = 500)
+function Invoke-FeedStatusCheck {
+    param(
+        [int]$Retries = 10,
+        [int]$DelayMs = 500,
+        [double]$MaxLiveBarAgeSec = 3.0
+    )
 
     for ($i = 1; $i -le $Retries; $i++) {
         try {
-            $metrics = Invoke-RestMethod -Uri "http://127.0.0.1:$BackendPort/api/v1/metrics?botId=bot-1" -Method Get -TimeoutSec 5 -UseBasicParsing
-            $ageMs = $metrics.bots."bot-1".last_bar_age_ms
+            $state = Invoke-RestMethod -Uri "http://127.0.0.1:$BackendPort/api/v1/state?botId=bot-1" -Method Get -TimeoutSec 5 -UseBasicParsing
+            $status = ($state.feed_status | ForEach-Object { "$_" }).ToUpperInvariant()
 
-            $monitor = Invoke-RestMethod -Uri "http://127.0.0.1:$BackendPort/api/v1/monitor/status?botId=bot-1" -Method Get -TimeoutSec 5 -UseBasicParsing
-            if ($monitor.ok -eq $true -and $ageMs -ne $null -and [int]$ageMs -le 2500) {
-                Write-Host "Feed+monitor check succeeded on attempt $i (age_ms=$ageMs)."
-                return $true
+            if ($status -eq "NO_FEED") {
+                Write-Warning "WS server OK, no Ninja feed yet (feed_status=NO_FEED)."
+                return @{ ok = $true; live = $false; state = $state }
             }
-            Write-Warning "Feed not ready yet (attempt $i): monitor_ok=$($monitor.ok) age_ms=$ageMs"
+
+            if ($status -eq "LIVE") {
+                if ($state.ws_connected -ne $true) {
+                    Throw-DoctorError("feed_status=LIVE but ws_connected=false (possible fake feed).")
+                }
+                $age = $state.bar_age_sec
+                if ($age -ne $null -and [double]$age -le $MaxLiveBarAgeSec) {
+                    Write-Host "Ninja feed LIVE (bar_age_sec=$age)."
+                    return @{ ok = $true; live = $true; state = $state }
+                }
+                Write-Warning "Feed reported LIVE but stale (attempt $i): bar_age_sec=$age"
+            } else {
+                Write-Warning "Unknown feed_status='$($state.feed_status)' (attempt $i)."
+            }
         } catch {
-            Write-Warning "Feed check attempt $i failed: $_"
+            Write-Warning "State/feed check attempt $i failed: $_"
         }
         Start-Sleep -Milliseconds $DelayMs
     }
-    return $false
+
+    return @{ ok = $false; live = $true; state = $null }
 }
 
 function Has-RecentLogIssues {
@@ -307,7 +324,8 @@ for ($cycle = 1; $cycle -le $MonitorRestarts; $cycle++) {
         continue
     }
 
-    if (-not (Invoke-FeedCheck)) {
+    $feedCheck = Invoke-FeedStatusCheck
+    if ($feedCheck.ok -ne $true) {
         Restart-Backend
         Start-Sleep -Seconds 2
         continue

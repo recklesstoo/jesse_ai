@@ -40,7 +40,6 @@ $BackendCommand = @"
 Set-Location -Path '$RepoRoot';
 `$env:PYTHONPATH = '$RepoRoot';
 if (Test-Path '.\\.venv\\Scripts\\python.exe') { } else { Write-Error 'Missing .venv. Run scripts\\doctor.ps1 first.'; exit 1 }
-`$env:WYCKOFF_SIM_FEED = '1';
 Write-Host 'Backend log: $BackendLog';
 & .\\.venv\\Scripts\\python.exe -m uvicorn backend.app:app --host 0.0.0.0 --port $BackendPort --reload --reload-dir backend --reload-dir backend/routers --reload-dir backend/services --reload-dir backend/ws 2>&1 | ForEach-Object { `$_.ToString() } | Tee-Object -FilePath '$BackendLog' -Append;
 "@

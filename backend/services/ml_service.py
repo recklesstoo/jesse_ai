@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from backend.models import Bar
@@ -71,7 +72,12 @@ class MLService:
         test_size: float = 0.2,
     ) -> tuple[bool, Dict[str, Any]]:
         try:
-            query = db.query(Bar).filter(Bar.bot_id == bot_id).order_by(Bar.ts_utc.asc())
+            query = (
+                db.query(Bar)
+                .filter(Bar.bot_id == bot_id)
+                .filter(or_(Bar.mode.is_(None), ~Bar.mode.ilike("SIM%")))
+                .order_by(Bar.ts_utc.asc())
+            )
             df = pd.read_sql(query.statement, db.bind)
 
             if len(df) < 200:
@@ -297,7 +303,13 @@ class MLService:
         cfg = wyckoff_config or {}
         min_bars = int(cfg.get("min_bars", 20))
         limit = max(100, min_bars * 2)
-        query = db.query(Bar).filter(Bar.bot_id == bot_id).order_by(Bar.ts_utc.desc()).limit(limit)
+        query = (
+            db.query(Bar)
+            .filter(Bar.bot_id == bot_id)
+            .filter(or_(Bar.mode.is_(None), ~Bar.mode.ilike("SIM%")))
+            .order_by(Bar.ts_utc.desc())
+            .limit(limit)
+        )
         df_hist = pd.read_sql(query.statement, db.bind).sort_values("ts_utc")
 
         if len(df_hist) < min_bars:
