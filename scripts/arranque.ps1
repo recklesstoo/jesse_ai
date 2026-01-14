@@ -4,13 +4,158 @@ param(
     [int]$MaxAttempts = 20,
     [int]$DelayMs = 400,
     [switch]$BackendOnly,
-    [switch]$FrontendOnly
+    [switch]$FrontendOnly,
+    [switch]$SmokeTest
 )
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = (Resolve-Path (Join-Path $ScriptRoot "..")).Path
 
-. (Join-Path $ScriptRoot "kill-port.ps1")
+function Get-ListeningPidsForPort {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    try {
+        $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
+        return @($conns | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { $_ -gt 0 })
+    } catch {
+        $pids = New-Object System.Collections.Generic.List[int]
+        try {
+            $lines = netstat -ano -p TCP 2>$null
+            foreach ($line in $lines) {
+                if ($line -notmatch "LISTENING") { continue }
+                if ($line -notmatch ":(?:$Port)\\s") { continue }
+                if ($line -match "LISTENING\\s+(\\d+)\\s*$") {
+                    $owningPid = [int]$matches[1]
+                    if ($owningPid -gt 0 -and -not $pids.Contains($owningPid)) { $pids.Add($owningPid) }
+                }
+            }
+        } catch {
+            return @()
+        }
+        return @($pids)
+    }
+}
+
+function Stop-ProcessTree {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $visited = New-Object "System.Collections.Generic.HashSet[int]"
+
+    function Stop-Node([int]$NodePid) {
+        if ($NodePid -le 0) { return }
+        if ($visited.Contains($NodePid)) { return }
+        [void]$visited.Add($NodePid)
+
+        $children = @()
+        try {
+            $children = @(
+                Get-CimInstance Win32_Process -Filter "ParentProcessId=$NodePid" -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty ProcessId
+            )
+        } catch { $children = @() }
+
+        foreach ($child in $children) { Stop-Node -NodePid $child }
+
+        try {
+            Stop-Process -Id $NodePid -Force -ErrorAction SilentlyContinue
+        } catch { }
+    }
+
+    Stop-Node -NodePid $ProcessId
+}
+
+function Release-Port {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$MaxCycles = 5
+    )
+
+    for ($cycle = 1; $cycle -le $MaxCycles; $cycle++) {
+        $pids = @(Get-ListeningPidsForPort -Port $Port | Sort-Object -Unique)
+        if ($pids.Count -eq 0) {
+            Write-Host "Port $Port is free."
+            return $true
+        }
+
+        $pidLabels = foreach ($owningPid in $pids) {
+            $proc = Get-Process -Id $owningPid -ErrorAction SilentlyContinue
+            if ($proc) { "$owningPid($($proc.ProcessName))" } else { "$owningPid(<exited>)" }
+        }
+        Write-Host "Port $Port LISTENING PIDs: $($pidLabels -join ', ')"
+
+        if ($pids -contains 4) {
+            Write-Warning "Port $Port is held by SYSTEM/service (PID 4); cannot stop safely."
+            break
+        }
+
+        foreach ($owningPid in $pids) {
+            $proc = Get-Process -Id $owningPid -ErrorAction SilentlyContinue
+            if (-not $proc) { continue }
+            Write-Host "Stopping PID $owningPid ($($proc.ProcessName))..."
+            Stop-ProcessTree -ProcessId $owningPid
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    $remaining = @(Get-ListeningPidsForPort -Port $Port | Sort-Object -Unique)
+    if ($remaining.Count -eq 0) {
+        Write-Host "Port $Port is free."
+        return $true
+    }
+
+    Write-Warning "Failed to release port $Port after $MaxCycles cycles."
+    Write-Host "Diagnostic: netstat -ano | findstr \":$Port\""
+    try { netstat -ano | findstr ":$Port" } catch { }
+
+    if ($remaining.Count -gt 0) {
+        Write-Host "Processes still owning LISTENING sockets:"
+        foreach ($owningPid in $remaining) {
+            $proc = Get-Process -Id $owningPid -ErrorAction SilentlyContinue
+            if ($proc) {
+                Write-Host ("- {0} ({1})" -f $owningPid, $proc.ProcessName)
+            } else {
+                Write-Host ("- {0} (<exited>)" -f $owningPid)
+            }
+        }
+    }
+
+    return $false
+}
+
+if ($SmokeTest) {
+    $testPort = 18000
+    Write-Host "SmokeTest: starting dummy listener on port $testPort..."
+
+    $psExe = Join-Path $env:WINDIR "System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+    if (-not (Test-Path $psExe)) { $psExe = "powershell.exe" }
+
+    $listenerCmd = @"
+`$ErrorActionPreference = 'Stop'
+`$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $testPort)
+`$listener.Start()
+Start-Sleep -Seconds 60
+"@
+
+    $p = Start-Process -FilePath $psExe -ArgumentList @("-NoProfile", "-Command", $listenerCmd) -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 250
+
+    $pids = @(Get-ListeningPidsForPort -Port $testPort)
+    if ($pids.Count -eq 0) {
+        Write-Host "FAIL: listener did not bind to port $testPort."
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
+        exit 1
+    }
+
+    $ok = Release-Port -Port $testPort -MaxCycles 5
+    if (-not $ok) {
+        Write-Host "FAIL: Release-Port did not free port $testPort."
+        exit 1
+    }
+
+    Write-Host "PASS: Release-Port freed port $testPort."
+    exit 0
+}
 
 $LogsRoot = Join-Path $RepoRoot "logs"
 New-Item -ItemType Directory -Force -Path $LogsRoot | Out-Null
@@ -33,7 +178,11 @@ if (-not $BackendOnly) { $portsToRelease += $FrontendPort }
 
 foreach ($port in $portsToRelease) {
     Write-Host "Releasing port $port..."
-    Release-Port -Port $port -MaxAttempts $MaxAttempts -DelayMs $DelayMs
+    $ok = Release-Port -Port $port -MaxCycles 5
+    if (-not $ok) {
+        Write-Error "Port $port could not be freed; aborting startup."
+        exit 1
+    }
 }
 
 $BackendCommand = @"
