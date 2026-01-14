@@ -200,7 +200,7 @@ function Invoke-FeedStatusCheck {
     param(
         [int]$Retries = 10,
         [int]$DelayMs = 500,
-        [double]$MaxLiveBarAgeSec = 3.0
+        [double]$MaxLiveBarAgeSec = 10.0
     )
 
     for ($i = 1; $i -le $Retries; $i++) {
@@ -218,11 +218,19 @@ function Invoke-FeedStatusCheck {
                     Throw-DoctorError("feed_status=LIVE but ws_connected=false (possible fake feed).")
                 }
                 $age = $state.bar_age_sec
-                if ($age -ne $null -and [double]$age -le $MaxLiveBarAgeSec) {
-                    Write-Host "Ninja feed LIVE (bar_age_sec=$age)."
+                $maxAge = [double]$MaxLiveBarAgeSec
+                if ($state.feed_stale_sec -ne $null) {
+                    try { $maxAge = [double]$state.feed_stale_sec } catch { }
+                }
+                if ($age -ne $null -and [double]$age -le $maxAge) {
+                    Write-Host "Ninja feed LIVE (bar_age_sec=$age, feed_stale_sec=$maxAge)."
                     return @{ ok = $true; live = $true; state = $state }
                 }
-                Write-Warning "Feed reported LIVE but stale (attempt $i): bar_age_sec=$age"
+                Write-Warning "Feed reported LIVE but stale (attempt $i): bar_age_sec=$age (feed_stale_sec=$maxAge)"
+            } elseif ($status -eq "STALE") {
+                $age = $state.bar_age_sec
+                Write-Warning "Ninja feed is STALE (bar_age_sec=$age)."
+                return @{ ok = $true; live = $false; state = $state }
             } else {
                 Write-Warning "Unknown feed_status='$($state.feed_status)' (attempt $i)."
             }

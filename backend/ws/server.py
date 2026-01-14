@@ -24,7 +24,6 @@ from backend.state import (
     _update_log_event,
     state_lock,
     ws_bots,
-    ws_last_rx_ts,
     ws_live_clients,
 )
 
@@ -41,9 +40,16 @@ def _parse_timestamp(value: Optional[str]) -> datetime:
     try:
         if value.endswith("Z"):
             value = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except Exception:
         return datetime.now(timezone.utc)
+
+
+def _iso_z(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _save_bar_sync(bot_id: str, payload: Dict[str, Any]) -> None:
@@ -180,13 +186,11 @@ def _update_bot_connection(bot_id: str, websocket: WebSocket) -> None:
         },
     )
     ws_bots[bot_id] = websocket
-    ws_last_rx_ts[bot_id] = datetime.now(timezone.utc)
 
 
 def _cleanup_bot(bot_id: str, websocket: WebSocket) -> None:
     if ws_bots.get(bot_id) is websocket:
         ws_bots.pop(bot_id, None)
-    ws_last_rx_ts.pop(bot_id, None)
     _set_bot_state(
         bot_id,
         {
@@ -232,8 +236,14 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
         while True:
             raw = await websocket.receive_text()
             async with state_lock:
-                ws_last_rx_ts[bot_id] = datetime.now(timezone.utc)
-                _set_bot_state(bot_id, {"last_seen_utc": _iso(datetime.now(timezone.utc))})
+                now = datetime.now(timezone.utc)
+                _set_bot_state(
+                    bot_id,
+                    {
+                        "last_seen_utc": _iso(now),
+                        "last_ws_rx_utc": _iso(now),
+                    },
+                )
             try:
                 message = json.loads(raw)
             except Exception:
@@ -264,13 +274,10 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
 
 
 async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
-    ts = payload.get("timestamp")
-    ts_dt: Optional[datetime] = None
-    if ts:
-        try:
-            ts_dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        except Exception:
-            ts_dt = None
+    now = datetime.now(timezone.utc)
+    ts_raw = payload.get("timestamp")
+    ts_dt = _parse_timestamp(str(ts_raw)) if ts_raw else None
+    ts_iso = _iso_z(ts_dt) if ts_dt is not None else None
     symbol = payload.get("symbol") or "MNQ"
     timeframe = payload.get("timeframe")
     o = _safe_float(payload.get("open"))
@@ -287,9 +294,13 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
             instrument=symbol,
             mode=payload.get("mode", current_mode),
         )
-        state["last_bar_ts"] = ts
+        state["last_bar_ts"] = ts_iso
+        state["last_bar_payload_ts_utc"] = ts_iso
+        state["last_bar_rx_utc"] = _iso(now)
+        if payload.get("mode") is not None:
+            state["last_mode"] = payload.get("mode")
         if ts_dt is not None:
-            state["last_bar_dt"] = ts_dt.isoformat()
+            state["last_bar_dt"] = ts_dt.astimezone(timezone.utc).isoformat()
         state["last_price"] = c
         state["last_ohlc"] = {"open": o, "high": h, "low": l, "close": c}
         state["last_volume"] = vol
@@ -319,11 +330,12 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
         {
             "type": "bar_update",
             "data": {
+                "botId": bot_id,
                 "symbol": symbol,
                 "price": c,
                 "ohlc": {"open": o, "high": h, "low": l, "close": c},
                 "volume": vol,
-                "timestamp": ts,
+                "timestamp": ts_iso,
             },
         }
     )
@@ -331,11 +343,30 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
 
 
 async def _handle_monitor(bot_id: str, payload: Dict[str, Any]) -> None:
+    now = datetime.now(timezone.utc)
+    ts_raw = payload.get("ts") or payload.get("timestamp")
+    ts_dt = _parse_timestamp(str(ts_raw)) if ts_raw else None
+    ts_iso = _iso_z(ts_dt) if ts_dt is not None else _iso_z(now)
+    interval = (
+        payload.get("MonitorIntervalSec")
+        or payload.get("monitorIntervalSec")
+        or payload.get("intervalSec")
+        or payload.get("interval")
+    )
     async with state_lock:
         state = _get_bot_state(bot_id)
         state["strategyMonitor"] = payload
-        state["strategyMonitor_ts"] = payload.get("ts") or _iso(datetime.now(timezone.utc))
+        state["strategyMonitor_ts"] = ts_iso
+        state["last_monitor_payload_ts_utc"] = ts_iso
+        state["last_monitor_rx_utc"] = _iso(now)
         state["mode"] = payload.get("mode") or state.get("mode") or "UNKNOWN"
+        if payload.get("mode") is not None:
+            state["last_mode"] = payload.get("mode")
+        if interval is not None:
+            try:
+                state["monitor_interval_sec"] = float(interval)
+            except Exception:
+                pass
     asyncio.create_task(asyncio.to_thread(_save_monitor_snapshot_sync, bot_id, payload))
     await _broadcast_live(
         {

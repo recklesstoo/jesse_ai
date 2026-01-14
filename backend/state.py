@@ -10,11 +10,13 @@ from fastapi import WebSocket
 
 ws_bots: Dict[str, WebSocket] = {}
 ws_live_clients: Set[WebSocket] = set()
-ws_last_rx_ts: Dict[str, datetime] = {}
 bot_state: Dict[str, Dict[str, Any]] = {}
 state_lock = asyncio.Lock()
 
-FEED_LIVE_MAX_AGE_SEC = float(os.getenv("WYCKOFF_FEED_LIVE_MAX_AGE_SEC", "3.0"))
+FEED_STALE_SEC_DEFAULT_1S = float(os.getenv("WYCKOFF_FEED_STALE_SEC_DEFAULT_1S", "10.0"))
+FEED_STALE_SEC_DEFAULT_1M = float(os.getenv("WYCKOFF_FEED_STALE_SEC_DEFAULT_1M", "180.0"))
+FEED_STALE_SEC_FALLBACK = float(os.getenv("WYCKOFF_FEED_STALE_SEC_FALLBACK", "10.0"))
+MONITOR_STALE_SEC_FALLBACK = float(os.getenv("WYCKOFF_MONITOR_STALE_SEC_FALLBACK", "30.0"))
 AI_MIN_LIVE_BARS = int(os.getenv("WYCKOFF_AI_MIN_LIVE_BARS", "50"))
 
 
@@ -98,15 +100,75 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _parse_timeframe_seconds(value: Any) -> Optional[float]:
+    if not value:
+        return None
+    raw = str(value).strip().lower()
+    raw = (
+        raw.replace("minutes", "minute")
+        .replace("mins", "min")
+        .replace("seconds", "second")
+        .replace("secs", "sec")
+    )
+
+    import re
+
+    m = re.match(r"^(\d+)\s*(s|sec|second)$", raw)
+    if m:
+        return float(m.group(1))
+    m = re.match(r"^(\d+)\s*(m|min|minute)$", raw)
+    if m:
+        return float(m.group(1)) * 60.0
+    m = re.match(r"^(\d+)\s*(h|hour)$", raw)
+    if m:
+        return float(m.group(1)) * 3600.0
+    m = re.match(r"^(\d+)(s|m|h)$", raw)
+    if m:
+        n = float(m.group(1))
+        unit = m.group(2)
+        return n if unit == "s" else (n * 60.0 if unit == "m" else n * 3600.0)
+    return None
+
+
+def _normalize_nt_mode(value: Any) -> str:
+    if not value:
+        return "UNKNOWN"
+    raw = str(value).strip().upper()
+    if not raw:
+        return "UNKNOWN"
+    if "BACK" in raw or "HIST" in raw or "ANALYZ" in raw:
+        return "BACKTEST"
+    if "LIVE" in raw or "REAL" in raw:
+        return "LIVE"
+    return "UNKNOWN"
+
+
+def _compute_feed_stale_sec(timeframe_seconds: Optional[float]) -> float:
+    if timeframe_seconds is None or timeframe_seconds <= 0:
+        return FEED_STALE_SEC_FALLBACK
+    if timeframe_seconds <= 2:
+        return max(FEED_STALE_SEC_DEFAULT_1S, 3.0 * timeframe_seconds)
+    if timeframe_seconds >= 60:
+        return max(FEED_STALE_SEC_DEFAULT_1M, 3.0 * timeframe_seconds)
+    return max(FEED_STALE_SEC_FALLBACK, 3.0 * timeframe_seconds)
+
+
+def _compute_monitor_stale_sec(monitor_interval_sec: Optional[float]) -> float:
+    if monitor_interval_sec is None or monitor_interval_sec <= 0:
+        return MONITOR_STALE_SEC_FALLBACK
+    return max(MONITOR_STALE_SEC_FALLBACK, 3.0 * monitor_interval_sec)
+
+
 def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     state = _get_bot_state(bot_id)
-    ws_connected = bool(state.get("connected"))
 
-    last_bar_ts = state.get("last_bar_dt") or state.get("last_bar_ts")
-    last_bar_dt = _parse_dt(last_bar_ts)
-    bar_age_sec: Optional[float] = None
-    if last_bar_dt is not None:
-        bar_age_sec = (_utc_now() - last_bar_dt).total_seconds()
+    now = _utc_now()
+
+    ws_connected = bool(state.get("connected"))
+    last_ws_rx_dt = _parse_dt(state.get("last_ws_rx_utc"))
+    ws_age_sec: Optional[float] = None
+    if last_ws_rx_dt is not None:
+        ws_age_sec = (now - last_ws_rx_dt).total_seconds()
 
     bar_interval_ms = state.get("bar_interval_ms")
     interval_sec: Optional[float] = None
@@ -115,54 +177,63 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
             interval_sec = max(0.0, float(bar_interval_ms) / 1000.0)
         except Exception:
             interval_sec = None
-
-    def _parse_timeframe_seconds(value: Any) -> Optional[float]:
-        if not value:
-            return None
-        raw = str(value).strip().lower()
-        raw = raw.replace("minutes", "minute").replace("mins", "min").replace("seconds", "second").replace("secs", "sec")
-        import re
-
-        m = re.match(r"^(\d+)\s*(s|sec|second)$", raw)
-        if m:
-            return float(m.group(1))
-        m = re.match(r"^(\d+)\s*(m|min|minute)$", raw)
-        if m:
-            return float(m.group(1)) * 60.0
-        m = re.match(r"^(\d+)\s*(h|hour)$", raw)
-        if m:
-            return float(m.group(1)) * 3600.0
-        m = re.match(r"^(\d+)(s|m|h)$", raw)
-        if m:
-            n = float(m.group(1))
-            unit = m.group(2)
-            return n if unit == "s" else (n * 60.0 if unit == "m" else n * 3600.0)
-        return None
-
     if interval_sec is None:
         interval_sec = _parse_timeframe_seconds(state.get("timeframe"))
 
-    feed_stale_threshold_sec = FEED_LIVE_MAX_AGE_SEC
-    if interval_sec is not None and interval_sec > 0:
-        feed_stale_threshold_sec = max(FEED_LIVE_MAX_AGE_SEC, interval_sec * 1.5 + 1.0)
+    feed_stale_sec = _compute_feed_stale_sec(interval_sec)
 
-    monitor_ts = state.get("strategyMonitor_ts")
-    monitor_dt = _parse_dt(monitor_ts)
+    last_bar_rx_dt = _parse_dt(state.get("last_bar_rx_utc"))
+    bar_age_sec: Optional[float] = None
+    if last_bar_rx_dt is not None:
+        bar_age_sec = (now - last_bar_rx_dt).total_seconds()
+
+    last_monitor_rx_dt = _parse_dt(state.get("last_monitor_rx_utc"))
     monitor_age_sec: Optional[float] = None
-    if monitor_dt is not None:
-        monitor_age_sec = (_utc_now() - monitor_dt).total_seconds()
+    if last_monitor_rx_dt is not None:
+        monitor_age_sec = (now - last_monitor_rx_dt).total_seconds()
 
-    feed_status = "LIVE" if (ws_connected and bar_age_sec is not None and bar_age_sec <= feed_stale_threshold_sec) else "NO_FEED"
+    monitor_interval_sec: Optional[float] = None
+    if state.get("monitor_interval_sec") is not None:
+        try:
+            monitor_interval_sec = float(state.get("monitor_interval_sec"))
+        except Exception:
+            monitor_interval_sec = None
+    monitor_stale_sec = _compute_monitor_stale_sec(monitor_interval_sec)
+
+    if last_bar_rx_dt is None:
+        feed_status = "NO_FEED"
+    elif bar_age_sec is not None and bar_age_sec <= feed_stale_sec:
+        feed_status = "LIVE"
+    else:
+        feed_status = "STALE"
+
+    if last_monitor_rx_dt is None:
+        monitor_status = "NO_MONITOR"
+    elif monitor_age_sec is not None and monitor_age_sec <= monitor_stale_sec:
+        monitor_status = "OK"
+    else:
+        monitor_status = "STALE"
+
+    nt_mode = _normalize_nt_mode(state.get("last_mode"))
+    last_bar_payload_dt = _parse_dt(state.get("last_bar_payload_ts_utc"))
+    last_bar_payload_iso = last_bar_payload_dt.isoformat().replace("+00:00", "Z") if last_bar_payload_dt is not None else None
 
     return {
         "bot_id": bot_id,
         "feed_status": feed_status,
         "ws_connected": ws_connected,
-        "last_bar_ts_utc": last_bar_dt.isoformat() if last_bar_dt is not None else None,
+        "ws_age_sec": ws_age_sec,
+        "monitor_status": monitor_status,
         "bar_age_sec": bar_age_sec,
         "monitor_age_sec": monitor_age_sec,
+        "feed_stale_sec": feed_stale_sec,
+        "monitor_stale_sec": monitor_stale_sec,
+        "nt_mode": nt_mode,
+        "last_mode": state.get("last_mode"),
+        "last_bar_ts_utc": last_bar_payload_iso,
+        "last_bar_rx_utc": _iso(last_bar_rx_dt),
+        "last_monitor_rx_utc": _iso(last_monitor_rx_dt),
         "bar_interval_ms": bar_interval_ms,
-        "feed_stale_threshold_sec": feed_stale_threshold_sec,
         "last_symbol": state.get("instrument"),
         "last_timeframe": state.get("timeframe"),
         "last_price": state.get("last_price"),

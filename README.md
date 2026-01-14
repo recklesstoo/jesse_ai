@@ -28,3 +28,15 @@
 - `/api/v1/health` returns `{"ok": true, ...}` so the doctor script treats it as success (the endpoint must be responsive for the run to finish cleanly).
 - `/ws/test-bot` performs a minimal WebSocket handshake to confirm `/ws/{botId}` is reachable.
 - Logs live in `logs/` and are ignored by Git. `doctor.ps1` will tail the logs referenced in `logs\latest.json` after a successful run.
+
+## Dashboard badges (NT MODE / STALE)
+
+The top badges are driven by `GET http://127.0.0.1:8000/api/v1/state?botId=...` and are computed server-side in **UTC**:
+
+- `CONNECTED`: the BridgePuppet socket is connected (`ws_connected=true`).
+- `NT MODE`: derived from the latest Ninja `payload.mode` (`LIVE` / `BACKTEST` / `UNKNOWN`).
+- `WS AGE`: seconds since the last Ninja WS event received (`ws_age_sec`, any message type).
+- `BAR AGE` + `FEED`: seconds since the last `BAR_DATA` was received (`bar_age_sec`) and `feed_status` (`NO_FEED` / `LIVE` / `STALE`).
+- `MON AGE` + `MONITOR`: seconds since the last `MONITOR` was received (`monitor_age_sec`) and `monitor_status` (`NO_MONITOR` / `OK` / `STALE`).
+
+Note: `BAR AGE`/staleness is computed from the server-side receive time (not the payload timestamp) to avoid false STALE during backtests or clock drift.

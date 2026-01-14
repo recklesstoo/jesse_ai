@@ -385,9 +385,12 @@ export default function App() {
   const [feedState, setFeedState] = useState({
     feed_status: "NO_FEED",
     ws_connected: false,
+    ws_age_sec: null,
     last_bar_ts_utc: null,
     bar_age_sec: null,
-    monitor_age_sec: null
+    monitor_status: "NO_MONITOR",
+    monitor_age_sec: null,
+    nt_mode: "UNKNOWN"
   });
   const [healthOk, setHealthOk] = useState(false);
   const [shadowMode, setShadowMode] = useState(false);
@@ -440,7 +443,6 @@ export default function App() {
     calendar: null,
     monitor: null
   });
-  const [lastWsAt, setLastWsAt] = useState(null);
   const [monitorStatus, setMonitorStatus] = useState(null);
 
   const [toasts, setToasts] = useState([]);
@@ -634,9 +636,10 @@ export default function App() {
 
       ws.addEventListener("message", (event) => {
         try {
-          setLastWsAt(Date.now());
           const msg = JSON.parse(event.data);
           if (msg.type === "bar_update") {
+            const msgBotId = msg?.data?.botId || msg?.data?.bot_id;
+            if (msgBotId && msgBotId !== BOT_ID) return;
             barBufferRef.current = {
               symbol: msg.data.symbol,
               price: msg.data.price,
@@ -646,6 +649,8 @@ export default function App() {
             };
           }
           if (msg.type === "bot_status") {
+            const statusBotId = msg?.data?.status?.botId || msg?.data?.status?.bot_id;
+            if (statusBotId && statusBotId !== BOT_ID) return;
             setBotStatus(msg.data.status || {});
           }
           if (msg.type === "connection_status") {
@@ -995,51 +1000,26 @@ export default function App() {
     return `${mm}:${ss}`;
   }, [clock, sessionStart]);
 
-  const botMetrics = useMemo(() => metrics?.bots?.[BOT_ID] || null, [metrics]);
-  const barAgeSec = useMemo(() => {
-    if (!botMetrics || botMetrics.last_bar_age_ms === null || botMetrics.last_bar_age_ms === undefined) return null;
-    return Math.max(0, Math.round(botMetrics.last_bar_age_ms / 1000));
-  }, [botMetrics]);
-  const monitorBarAgeSec = useMemo(() => {
-    if (!monitorStatus) return null;
-    const received = monitorStatus.lastBarReceivedAgeSec;
-    if (received !== null && received !== undefined) {
-      return Math.max(0, Math.round(Number(received)));
-    }
-    if (monitorStatus.lastBarAgeSec === null || monitorStatus.lastBarAgeSec === undefined) {
-      return null;
-    }
-    return Math.max(0, Math.round(Number(monitorStatus.lastBarAgeSec)));
-  }, [monitorStatus]);
-  const strategyMonitorAgeSec = useMemo(() => {
-    if (!monitorStatus) return null;
-    const value = monitorStatus.strategyMonitorAgeSec;
-    if (value === null || value === undefined) return null;
-    return Math.max(0, Math.round(Number(value)));
-  }, [monitorStatus]);
-  const barIntervalMs = useMemo(() => {
-    if (!botMetrics || botMetrics.bar_interval_ms === null || botMetrics.bar_interval_ms === undefined) return null;
-    return Math.round(botMetrics.bar_interval_ms);
-  }, [botMetrics]);
   const feedAgeSec = useMemo(() => {
     const stateAge = feedState?.bar_age_sec;
     if (stateAge !== null && stateAge !== undefined) return Math.max(0, Math.round(Number(stateAge)));
-    return monitorBarAgeSec !== null ? monitorBarAgeSec : barAgeSec;
-  }, [feedState?.bar_age_sec, monitorBarAgeSec, barAgeSec]);
+    return null;
+  }, [feedState?.bar_age_sec]);
 
-  const feedStaleThresholdSec = useMemo(() => {
-    const value = feedState?.feed_stale_threshold_sec;
-    if (value !== null && value !== undefined) return Math.max(3, Math.round(Number(value)));
-    if (barIntervalMs) return Math.max(3, Math.round((barIntervalMs / 1000) * 1.5 + 1));
-    return 3;
-  }, [feedState?.feed_stale_threshold_sec, barIntervalMs]);
-
-  const activityOk = feedState?.feed_status === "LIVE" && feedAgeSec !== null && feedAgeSec <= feedStaleThresholdSec;
-  const strategyOk = strategyMonitorAgeSec !== null && strategyMonitorAgeSec <= 10;
+  const activityOk = feedState?.feed_status === "LIVE";
+  const monitorOk = feedState?.monitor_status === "OK";
+  const monitorAgeSec = useMemo(() => {
+    const value = feedState?.monitor_age_sec;
+    if (value === null || value === undefined) return null;
+    return Math.max(0, Math.round(Number(value)));
+  }, [feedState?.monitor_age_sec]);
+  const bridgeConnected = Boolean(feedState?.ws_connected);
+  const ntMode = (feedState?.nt_mode || "UNKNOWN").toUpperCase();
   const wsAgeSec = useMemo(() => {
-    if (!lastWsAt) return null;
-    return Math.max(0, Math.round((Date.now() - lastWsAt) / 1000));
-  }, [clock, lastWsAt]);
+    const value = feedState?.ws_age_sec;
+    if (value === null || value === undefined) return null;
+    return Math.max(0, Math.round(Number(value)));
+  }, [feedState?.ws_age_sec]);
 
   const lastExec = execs[0];
   const lastExecEvent = lastExec ? lastEventById[lastExec.id] || (lastExec.error ? "ERROR" : "SENT") : null;
@@ -1167,8 +1147,8 @@ export default function App() {
           <div className="brand-sub">BRIDGEPUPPET CONTROL SURFACE</div>
         </div>
         <div className="status-pills">
-          <span className={`pill ${connected ? "pill-ok" : "pill-warn"}`}>
-            {connected ? "CONNECTED" : "DISCONNECTED"}
+          <span className={`pill ${bridgeConnected ? "pill-ok" : "pill-warn"}`}>
+            {bridgeConnected ? "CONNECTED" : "DISCONNECTED"}
           </span>
           <span className={`pill ${healthOk ? "pill-ok" : "pill-warn"}`}>
             HEALTH {healthOk ? "OK" : "--"}
@@ -1178,21 +1158,24 @@ export default function App() {
               SHADOW
             </span>
           )}
+          <span className={`pill ${ntMode === "LIVE" ? "pill-ok" : ntMode === "BACKTEST" ? "pill-warn" : ""}`}>
+            NT MODE {ntMode}
+          </span>
           <span className="pill">LAT {latencyMs} MS</span>
-          <span className={`pill ${wsAgeSec !== null && wsAgeSec <= 1 ? "pill-ok" : "pill-warn"}`}>
+          <span className={`pill ${wsAgeSec !== null && wsAgeSec <= 2 ? "pill-ok" : "pill-warn"}`}>
             WS AGE {wsAgeSec === null ? "--" : `${wsAgeSec}s`}
           </span>
           <span className={`pill ${activityOk ? "pill-ok" : "pill-warn"}`}>
             BAR AGE {feedAgeSec === null ? "--" : `${feedAgeSec}s`}
           </span>
           <span className={`pill ${activityOk ? "pill-ok" : "pill-warn"}`}>
-            FEED {activityOk ? "OK" : "STALE"}
+            FEED {activityOk ? "OK" : feedState.feed_status === "NO_FEED" ? "NO FEED" : "STALE"}
           </span>
-          <span className={`pill ${strategyOk ? "pill-ok" : "pill-warn"}`}>
-            STRAT AGE {strategyMonitorAgeSec === null ? "--" : `${strategyMonitorAgeSec}s`}
+          <span className={`pill ${monitorOk ? "pill-ok" : "pill-warn"}`}>
+            MON AGE {monitorAgeSec === null ? "--" : `${monitorAgeSec}s`}
           </span>
-          <span className={`pill ${monitorStatus?.ok ? "pill-ok" : "pill-warn"}`}>
-            MONITOR {monitorStatus?.ok ? "OK" : "STALE"}
+          <span className={`pill ${monitorOk ? "pill-ok" : "pill-warn"}`}>
+            MONITOR {monitorOk ? "OK" : feedState.monitor_status === "NO_MONITOR" ? "NO MONITOR" : "STALE"}
           </span>
           <span className="pill">TIME {clock}</span>
           <span className="pill">SESSION {sessionUptime}</span>
