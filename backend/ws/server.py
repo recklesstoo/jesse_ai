@@ -60,6 +60,62 @@ def _iso_z(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _parse_ts_utc(payload: Dict[str, Any]) -> Optional[datetime]:
+    """
+    Robust timestamp parsing for BAR_DATA payloads.
+
+    Accepts keys: ts, time, timestamp, bar_ts, barTs, t
+    Supports:
+      - epoch seconds (int/float)
+      - epoch milliseconds (heuristic > 1e12)
+      - ISO8601 strings with Z or offset
+
+    Returns timezone-aware datetime in UTC, or None. Never raises.
+    """
+    try:
+        raw = None
+        for key in ("ts", "time", "timestamp", "bar_ts", "barTs", "t"):
+            if key in payload and payload.get(key) is not None:
+                raw = payload.get(key)
+                break
+
+        if raw is None:
+            return None
+
+        if isinstance(raw, (int, float)):
+            v = float(raw)
+            if v > 1e12:
+                v = v / 1000.0
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+
+        raw_s = str(raw).strip()
+        if not raw_s:
+            return None
+
+        # Numeric string epoch
+        try:
+            v = float(raw_s)
+            if v > 1e12:
+                v = v / 1000.0
+            if v > 0:
+                return datetime.fromtimestamp(v, tz=timezone.utc)
+        except Exception:
+            pass
+
+        # ISO8601
+        try:
+            if raw_s.endswith("Z"):
+                raw_s = raw_s.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(raw_s)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
 def _save_bar_sync(bot_id: str, payload: Dict[str, Any]) -> None:
     db = _open_db()
     try:
@@ -70,6 +126,7 @@ def _save_bar_sync(bot_id: str, payload: Dict[str, Any]) -> None:
             symbol=payload.get("symbol"),
             timeframe=payload.get("timeframe"),
             ts_utc=ts,
+            day_utc=ts.astimezone(timezone.utc).date().isoformat(),
             open=_safe_float(payload.get("open")),
             high=_safe_float(payload.get("high")),
             low=_safe_float(payload.get("low")),
@@ -144,13 +201,15 @@ def _save_trade_event_sync(bot_id: str, payload: Dict[str, Any]) -> None:
     db = _open_db()
     try:
         now = datetime.now(timezone.utc)
+        ts = _parse_timestamp(payload.get("ts"))
         trade = TradeEvent(
             bot_id=bot_id,
             symbol=payload.get("symbol"),
             action=payload.get("action"),
             qty=_safe_int(payload.get("qty")),
             price=_safe_float(payload.get("price")),
-            ts_utc=_parse_timestamp(payload.get("ts")),
+            ts_utc=ts,
+            day_utc=ts.astimezone(timezone.utc).date().isoformat(),
             market_position=payload.get("marketPosition"),
             reason=payload.get("reason"),
             payload=payload,
@@ -308,9 +367,9 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
             )
         )
         return
-    ts_raw = payload.get("timestamp")
-    ts_dt = _parse_timestamp(str(ts_raw)) if ts_raw else None
-    ts_iso = _iso_z(ts_dt) if ts_dt is not None else None
+
+    ts = _parse_ts_utc(payload)
+    ts_iso = _iso_z(ts) if ts is not None else None
     symbol = payload.get("symbol") or "MNQ"
     timeframe = payload.get("timeframe")
     o = _safe_float(payload.get("open"))
@@ -318,9 +377,22 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
     l = _safe_float(payload.get("low"))
     c = _safe_float(payload.get("close"))
     vol = _safe_int(payload.get("volume"))
+
+    if ts is None:
+        # Never crash the WS if a BAR_DATA arrives without a valid timestamp.
+        async with state_lock:
+            state = _get_bot_state(bot_id)
+            state["feed_status"] = "STALE"
+            state["data_source"] = "UNKNOWN_TS"
+            state["last_bar_rx_utc"] = _iso(now)
+            state["last_bad_bar_ts_utc"] = _iso(now)
+            state["last_bad_bar_ts_reason"] = "missing_or_invalid_ts"
+        print(f"[ws] BAR_DATA missing/invalid timestamp; bot_id={bot_id} keys={sorted(list(payload.keys()))}")
+        return
+
     async with state_lock:
         state = _get_bot_state(bot_id)
-        prev_ts = state.get("last_bar_ts")
+        prev_ts = state.get("last_bar_payload_ts_utc") or state.get("last_bar_ts")
         current_mode = state.get("mode", "LIVE")
         state = update_bot_state(
             bot_id,
@@ -332,8 +404,7 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
         state["last_bar_rx_utc"] = _iso(now)
         if payload.get("mode") is not None:
             state["last_mode"] = payload.get("mode")
-        if ts_dt is not None:
-            state["last_bar_dt"] = ts_dt.astimezone(timezone.utc).isoformat()
+        state["last_bar_dt"] = ts.astimezone(timezone.utc).isoformat()
         state["last_price"] = c
         state["last_ohlc"] = {"open": o, "high": h, "low": l, "close": c}
         state["last_volume"] = vol
@@ -348,11 +419,12 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
         recent_bars.append(payload.copy())
         if len(recent_bars) > MAX_BARS_CACHE:
             del recent_bars[: len(recent_bars) - MAX_BARS_CACHE]
-        if prev_ts and ts:
+        prev_dt = _parse_timestamp(str(prev_ts)) if prev_ts else None
+        if prev_dt is not None and prev_dt.tzinfo is None:
+            prev_dt = prev_dt.replace(tzinfo=timezone.utc)
+        if prev_dt is not None and ts.tzinfo is not None:
             try:
-                prev_dt = datetime.fromisoformat(prev_ts.replace("Z", "+00:00"))
-                curr_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                diff_ms = int(max(0, (curr_dt - prev_dt).total_seconds() * 1000))
+                diff_ms = int(max(0, (ts - prev_dt.astimezone(timezone.utc)).total_seconds() * 1000))
                 if diff_ms > 0:
                     state["bar_interval_ms"] = diff_ms
             except Exception:
@@ -455,7 +527,11 @@ async def _handle_trade_event(bot_id: str, payload: Dict[str, Any]) -> None:
 
 async def _handle_ack(bot_id: str, payload: Dict[str, Any]) -> None:
     cmd_id = payload.get("id")
-    status = payload.get("status") or "ACK"
+    status = (payload.get("status") or "ACK").upper()
+    if status.startswith("SIM"):
+        # Hard stop: no simulated execution acks should ever reach the UI/logs.
+        status = "REJECTED"
+        payload = {**payload, "status": status, "reason": payload.get("reason") or "simulated acks disabled"}
     if cmd_id:
         async with state_lock:
             _update_log_event(bot_id, cmd_id, f"ACK_{status}", {"ack": payload})

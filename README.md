@@ -17,11 +17,27 @@
 - This dashboard shows **only real data** received from NinjaTrader via BridgePuppet.
 - BridgePuppet must connect to `ws://127.0.0.1:8000/ws/{botId}` and send `BAR_DATA` / `MONITOR` messages.
 - If BridgePuppet is not connected or not sending bars, the UI will show **WAITING FOR NINJATRADER DATA** and prices/OHLC stay as `--` (or the last real value marked stale).
+- To execute orders from the dashboard, the NinjaTrader strategy properties must allow it:
+  - `Enable Receive Commands = true` (otherwise commands are ignored)
+  - `Enable LIVE Execution = true` for live trading (otherwise BridgePuppet returns `ACK_IGNORED` with message about `EnableLiveExecution=false`)
+
+### Troubleshooting: BAR_DATA timestamp
+
+Previously, `/ws/{botId}` could crash if a `BAR_DATA` payload arrived without a valid timestamp, causing disconnect/reconnect loops.
+The backend now parses timestamps defensively and **never throws**: if `ts`/`timestamp` is missing or invalid, it marks the bot as `feed_status=STALE` and `data_source=UNKNOWN_TS`, records `last_bar_rx_utc` for debugging, and keeps the WebSocket alive.
 
 ## Manual commands
 
 - Backend (for debugging): `.\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload`.
 - Frontend: from `frontend\`, run `npm install` once and then `npm run dev -- --port 3001`.
+
+Execution gating (backend policy):
+
+- Backend policy uses `execution_mode`: `DISABLED | MANUAL_ONLY | LIVE_ALLOWED` (default: `MANUAL_ONLY`).
+- Query: `GET http://127.0.0.1:8000/api/v1/execution/status?botId=bot-1`
+- Set: `POST http://127.0.0.1:8000/api/v1/execution/enable` with JSON `{ "mode": "MANUAL_ONLY" }`
+  - Protect the toggle by setting env `WYCKOFF_EXECUTION_TOKEN` and sending header `x-execution-token`.
+- If policy rejects a command or the bot is disconnected, the backend returns an ACK object with a clear `reject_reason` (no simulated acks).
 
 ## Health & deployment checks
 
@@ -36,7 +52,8 @@ The top badges are driven by `GET http://127.0.0.1:8000/api/v1/state?botId=...` 
 - `CONNECTED`: the BridgePuppet socket is connected (`ws_connected=true`).
 - `NT MODE`: derived from the latest Ninja `payload.mode` (`LIVE` / `BACKTEST` / `UNKNOWN`).
 - `WS AGE`: seconds since the last Ninja WS event received (`ws_age_sec`, any message type).
-- `BAR AGE` + `FEED`: seconds since the last `BAR_DATA` was received (`bar_age_sec`) and `feed_status` (`NO_FEED` / `LIVE` / `STALE`).
+- `SRC`: `LIVE_WS` when the Ninja socket is connected, otherwise `CACHED` if the UI is showing the last known values, else `NONE`.
+- `BAR AGE` + `FEED`: seconds since the last `BAR_DATA` was received (`bar_age_sec`) and `feed_status` (`NO_FEED` / `LIVE` / `STALE`). **UI "LIVE" only means `SRC=LIVE_WS` + recent bars**.
 - `MON AGE` + `MONITOR`: seconds since the last `MONITOR` was received (`monitor_age_sec`) and `monitor_status` (`NO_MONITOR` / `OK` / `STALE`).
 
 Note: `BAR AGE`/staleness is computed from the server-side receive time (not the payload timestamp) to avoid false STALE during backtests or clock drift.
@@ -59,13 +76,13 @@ Important: the orchestrator/swarm is **read-only** and does not execute trades.
 ## Data Manager (import + cleanup)
 
 The backend stores bars/trades with a `data_source`:
-`LIVE_WS | IMPORT | SIMULATED | ARCHIVED` and all timestamps are treated as UTC.
+`LIVE_WS | IMPORT | CACHED | SIMULATED | ARCHIVED` and all timestamps are treated as UTC.
 
-- Summary totals: `GET http://127.0.0.1:8000/api/v1/data/summary`
+- Summary totals (optionally per day): `GET http://127.0.0.1:8000/api/v1/data/summary` and `GET http://127.0.0.1:8000/api/v1/data/summary?day=YYYY-MM-DD&symbol=MNQ`
 - Days available: `GET http://127.0.0.1:8000/api/v1/data/days?symbol=MNQ&botId=bot-1&source=LIVE_WS,IMPORT`
 - Import (explicit): `POST http://127.0.0.1:8000/api/v1/data/import` (multipart CSV/JSON)
 - Cleanup (explicit, safe by default):
-  - Preview: `POST http://127.0.0.1:8000/api/v1/data/cleanup/preview` → returns `confirm_token`
+  - Preview: `POST http://127.0.0.1:8000/api/v1/data/cleanup/preview` returns `confirm_token`
   - Apply: `POST http://127.0.0.1:8000/api/v1/data/cleanup/apply` with `confirm_token`
 
 The UI includes a **Data Manager** card for summary, day listing, import, and cleanup preview/apply.
