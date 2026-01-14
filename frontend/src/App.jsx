@@ -1,4 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import MLTrainingPanel from "./components/MLTrainingPanel";
+import ModelManager from "./components/ModelManager";
+import TrainingHistoryChart from "./components/TrainingHistoryChart";
+import ConfusionMatrixHeatmap from "./components/ConfusionMatrixHeatmap";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 const WS_BASE = API_BASE.replace(/^http/i, "ws");
@@ -328,6 +332,54 @@ function CommandLogModal({ open, onClose, entries }) {
   );
 }
 
+function ToastContainer({ toasts }) {
+  if (!toasts || toasts.length === 0) return null;
+  return (
+    <>
+      <style>{`
+        .toast-container {
+          position: fixed;
+          bottom: 20px;
+          right: 20px;
+          z-index: 9999;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          pointer-events: none;
+        }
+        .toast {
+          padding: 12px 20px;
+          border-radius: 4px;
+          color: #fff;
+          font-weight: bold;
+          box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+          animation: slideIn 0.3s ease-out;
+          pointer-events: auto;
+          min-width: 250px;
+          font-size: 0.9rem;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+        .toast-info { background: #3b82f6; border: 1px solid #2563eb; }
+        .toast-success { background: #10b981; border: 1px solid #059669; }
+        .toast-error { background: #ef4444; border: 1px solid #dc2626; }
+        @keyframes slideIn {
+          from { transform: translateX(100%); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+      `}</style>
+      <div className="toast-container">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast toast-${t.type}`}>
+            <span>{t.msg}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
 export default function App() {
   const [connected, setConnected] = useState(false);
   const [healthOk, setHealthOk] = useState(false);
@@ -383,6 +435,13 @@ export default function App() {
   });
   const [lastWsAt, setLastWsAt] = useState(null);
   const [monitorStatus, setMonitorStatus] = useState(null);
+
+  const [toasts, setToasts] = useState([]);
+  const addToast = (msg, type = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { id, msg, type }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+  };
 
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState([
@@ -559,20 +618,20 @@ export default function App() {
         const res = await fetch(`${API_BASE}/api/v1/health`);
         const ok = res.ok;
         setHealthOk(ok);
-        
+
         if (ok) {
           const data = await res.json();
           setShadowMode(Boolean(data.shadow_mode));
-          
+
           // Update snapshot age for current bot
           const botSnapshotAge = data.lastSnapshotAgeSec?.[BOT_ID];
           setSnapshotAge(botSnapshotAge);
-          
+
           // Update position state for current bot
           const botPosition = data.positionState?.[BOT_ID];
           setPositionState(botPosition);
         }
-        
+
         const ms = Math.round(performance.now() - start);
         setLatencyMs(ok ? ms : "--");
         setError("health", ok ? null : "Health check failed");
@@ -1233,6 +1292,24 @@ export default function App() {
               <div className="label">STRATEGY MONITOR</div>
               <div className="value">{formatTime(monitorStatus?.strategyMonitor?.ts)}</div>
             </div>
+            {monitorStatus?.strategyMonitor && (
+              <>
+                <div>
+                  <div className="label">WS STATE (NT8)</div>
+                  <div className="value">{monitorStatus.strategyMonitor.wsState || "--"}</div>
+                </div>
+                <div>
+                  <div className="label">BARS SENT (NT8)</div>
+                  <div className="value">
+                    {monitorStatus.strategyMonitor.sendCount} (Sk: {monitorStatus.strategyMonitor.skipCount})
+                  </div>
+                </div>
+                <div>
+                  <div className="label">MODE (NT8)</div>
+                  <div className="value">{monitorStatus.strategyMonitor.mode}</div>
+                </div>
+              </>
+            )}
             <div>
               <div className="label">INSTRUMENT</div>
               <div className="value">{botStatus.instrument || bar.symbol}</div>
@@ -1347,6 +1424,13 @@ export default function App() {
               </div>
             ))}
           </div>
+        </section>
+
+        <section className="card ml-card">
+          <MLTrainingPanel botId={BOT_ID} onToast={addToast} />
+          <ModelManager botId={BOT_ID} onToast={addToast} />
+          <TrainingHistoryChart botId={BOT_ID} />
+          <ConfusionMatrixHeatmap botId={BOT_ID} />
         </section>
 
         <section className="card limits-card">
@@ -1474,6 +1558,7 @@ export default function App() {
         onSave={saveAutoConfig}
         saving={autoSaving}
       />
+      <ToastContainer toasts={toasts} />
     </div>
   );
 }

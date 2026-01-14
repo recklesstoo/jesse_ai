@@ -48,6 +48,6 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000" ^| findstr LISTENING'
 echo [INFO] Iniciando backend en http://localhost:8000
 echo [INFO] Ctrl+C para detener
 
-python -m uvicorn app:app --app-dir backend --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
 
 endlocal

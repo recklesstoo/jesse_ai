@@ -18,8 +18,17 @@ class ChatIn(BaseModel):
 class MLTrainRequest(BaseModel):
     botId: str
     force: bool = False
+    n_estimators: Optional[int] = 100
+    max_depth: Optional[int] = 5
+    test_size: Optional[float] = 0.2
+
+class RestoreRequest(BaseModel):
+    botId: str
+    folder: str
+    filename: str
 
 class AISignalOut(BaseModel):
+    ok: bool = True
     signal: str
     bias: str
     confidence: float

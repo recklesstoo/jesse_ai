@@ -1,11 +1,21 @@
-
 import requests
 import json
+import sys
 
-try:
-    response = requests.get("http://localhost:8000/api/v1/health")
-    response.raise_for_status()  # Raise an exception for bad status codes
-    print(json.dumps(response.json(), indent=2))
-except requests.exceptions.RequestException as e:
-    print(f"Error: {e}")
-    exit(1)
+def check_service(name, url):
+    print(f"Checking {name} ({url})...", end=" ")
+    try:
+        response = requests.get(url, timeout=2)
+        if response.status_code == 200:
+            print("OK")
+            return True
+        print(f"FAIL (Status: {response.status_code})")
+        return False
+    except Exception as e:
+        print(f"FAIL ({e})")
+        return False
+
+if __name__ == "__main__":
+    backend = check_service("Backend", "http://localhost:8000/api/v1/health")
+    frontend = check_service("Frontend", "http://localhost:3001")
+    sys.exit(0 if backend and frontend else 1)

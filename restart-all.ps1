@@ -74,6 +74,7 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "& `"$backendScrip
 
 # Iniciar Frontend
 Write-Host "[INFO] Lanzando frontend en una nueva terminal..."
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location `"$frontendDir`"; Write-Host 'Lanzando frontend (npm start)...'; npm start"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location `"$frontendDir`"; Write-Host 'Lanzando frontend (npm run dev)...'; npm run dev"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location `"$frontendDir`"; Write-Host 'Lanzando frontend (npm run dev)...'; npm run dev -- --port 3001"
 
 Write-Host "[SUCCESS] Scripts de arranque lanzados en nuevas terminales." -ForegroundColor Green

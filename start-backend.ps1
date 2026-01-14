@@ -53,7 +53,23 @@ if ($inUse) {
   exit 20
 }
 
+Write-Host "[INFO] Verifying backend imports..." -ForegroundColor Cyan
+try {
+  $safeRoot = $root -replace "\\", "/"
+  python -c "import sys; sys.path.append('$safeRoot'); import backend.app; print('Imports OK')"
+  if ($LASTEXITCODE -ne 0) {
+    throw "Import check failed"
+  }
+}
+catch {
+  Fail "Backend import verification failed. Check python path and dependencies." 13
+}
+
+# --- Arranque canónico ---
 # --- Arranque canónico ---
 Write-Host "[INFO] Iniciando backend en http://localhost:$port" -ForegroundColor Cyan
 Write-Host "[INFO] Ctrl+C para detener" -ForegroundColor Cyan
+# Asegurar que estamos en el root antes de lanzar uvicorn
+Set-Location $root
+# Lanzar uvicorn como módulo
 python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload

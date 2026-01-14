@@ -1,0 +1,1 @@
+This directory contains the React components for the Jesse AI frontend.

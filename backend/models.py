@@ -1,10 +1,16 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, Index
-from sqlalchemy.sql import func
-from .database import Base
-import datetime
+from __future__ import annotations
 
-def utc_now():
-    return datetime.datetime.now(datetime.timezone.utc)
+from datetime import datetime, timezone
+
+from sqlalchemy import Column, DateTime, Float, Integer, JSON, String, Index
+from sqlalchemy.sql import func
+
+from backend.database import Base
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 class Bar(Base):
     __tablename__ = "bars"
@@ -22,8 +28,8 @@ class Bar(Base):
     mode = Column(String, default="LIVE")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Índice compuesto para búsquedas rápidas de series temporales
-    __table_args__ = (Index('idx_bars_bot_ts', 'bot_id', 'ts_utc'),)
+    __table_args__ = (Index("idx_bars_bot_ts", "bot_id", "ts_utc"),)
+
 
 class CommandEvent(Base):
     __tablename__ = "command_events"
@@ -31,9 +37,10 @@ class CommandEvent(Base):
     id = Column(Integer, primary_key=True, index=True)
     cmd_id = Column(String, index=True)
     bot_id = Column(String, index=True)
-    event = Column(String) # QUEUED, SENT, ACK, ERROR
+    event = Column(String)  # QUEUED, SENT, ACK, ERROR
     ts_utc = Column(DateTime(timezone=True), default=utc_now)
     payload = Column(JSON)
+
 
 class AISignal(Base):
     __tablename__ = "ai_signals"
@@ -43,12 +50,13 @@ class AISignal(Base):
     ts_utc = Column(DateTime(timezone=True), default=utc_now)
     bar_ts_utc = Column(DateTime(timezone=True))
     symbol = Column(String)
-    signal = Column(String) # NONE, SOS, SOW, etc.
-    bias = Column(String)   # BULLISH, BEARISH, NEUTRAL
+    signal = Column(String)
+    bias = Column(String)
     confidence = Column(Float)
     explain = Column(String)
-    features = Column(JSON) # Guardar features usadas
+    features = Column(JSON)
     model_version = Column(String)
+
 
 class BotConfig(Base):
     __tablename__ = "bot_configs"
@@ -58,6 +66,7 @@ class BotConfig(Base):
     auto_config = Column(JSON)
     updated_at = Column(DateTime(timezone=True), onupdate=utc_now)
 
+
 class MonitorSnapshot(Base):
     __tablename__ = "monitor_snapshots"
 
@@ -66,13 +75,19 @@ class MonitorSnapshot(Base):
     ts_utc = Column(DateTime(timezone=True), default=utc_now)
     data = Column(JSON)
 
-class TradeFill(Base):
-    __tablename__ = "trade_fills"
-    
+
+class TradeEvent(Base):
+    __tablename__ = "trade_events"
+
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(String, index=True)
     symbol = Column(String)
-    side = Column(String) # BUY, SELL
+    action = Column(String)
     qty = Column(Integer)
     price = Column(Float)
-    ts_utc = Column(DateTime(timezone=True))
+    ts_utc = Column(DateTime(timezone=True), default=utc_now)
+    market_position = Column(String)
+    reason = Column(String)
+    order_id = Column(String)
+    order_name = Column(String)
+    payload = Column(JSON)

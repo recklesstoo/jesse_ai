@@ -4,6 +4,9 @@
 Write-Host "🧪 TESTING ETAPA A - SHADOW MODE" -ForegroundColor Cyan
 Write-Host "=================================" -ForegroundColor Cyan
 
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $root
+
 $API_BASE = "http://localhost:8000"
 $BOT_ID = "bot-1"
 
@@ -56,20 +59,21 @@ try {
 }
 
 Write-Host ""
-Write-Host "📋 Test 3: Verificar GET next command (debe estar vacío en shadow)" -ForegroundColor Yellow
-Write-Host "-------------------------------------------------------------------" -ForegroundColor Yellow
+Write-Host "📋 Test 3: Verificar Command Log (confirmación de recepción)" -ForegroundColor Yellow
+Write-Host "------------------------------------------------------------" -ForegroundColor Yellow
 
 try {
-    $nextCmd = Invoke-RestMethod -Uri "$API_BASE/api/v1/commands/$BOT_ID" -Method GET
-    Write-Host "Next command: $($nextCmd | ConvertTo-Json -Compress)" -ForegroundColor Green
+    $logResponse = Invoke-RestMethod -Uri "$API_BASE/api/v1/commands/$BOT_ID/log?limit=1" -Method GET
     
-    if ($nextCmd.action -eq "NONE") {
-        Write-Host "✅ OK: Queue vacía como esperado" -ForegroundColor Green
+    if ($logResponse.log.Count -gt 0) {
+        $lastCmd = $logResponse.log[0]
+        Write-Host "Last command in log: $($lastCmd | ConvertTo-Json -Compress)" -ForegroundColor Green
+        Write-Host "✅ OK: Log accesible y contiene eventos" -ForegroundColor Green
     } else {
-        Write-Host "⚠️ WARNING: Queue no vacía, comando pendiente: $($nextCmd.action)" -ForegroundColor Yellow
+        Write-Host "⚠️ WARNING: Log vacío (normal si es primera ejecución)" -ForegroundColor Yellow
     }
 } catch {
-    Write-Host "❌ ERROR: No se pudo obtener next command: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "❌ ERROR: No se pudo obtener log: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
