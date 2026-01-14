@@ -19,6 +19,7 @@ from backend.models import (
     SystemEvent,
     TradeEvent,
     DATA_SOURCE_ARCHIVED,
+    DATA_SOURCE_CACHED,
     DATA_SOURCE_IMPORT,
     DATA_SOURCE_LIVE_WS,
     DATA_SOURCE_SIMULATED,
@@ -201,30 +202,69 @@ async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db))
 
 
 @router.get("/api/v1/data/summary")
-def data_summary(db: Session = Depends(get_db)) -> Dict[str, Any]:
+def data_summary(
+    day: Optional[str] = Query(None, description="UTC day (YYYY-MM-DD). When set, returns per-day counts."),
+    symbol: Optional[str] = Query(None),
+    botId: Optional[str] = Query(None, alias="botId"),
+    source: str = Query("LIVE_WS,IMPORT", description="Comma separated: LIVE_WS,IMPORT,CACHED,SIMULATED,ARCHIVED,ALL"),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    sources: Optional[List[str]] = None
+    if source and source.upper() != "ALL":
+        sources = [s.strip().upper() for s in source.split(",") if s.strip()]
+
+    def _filters(model) -> List[Any]:
+        filters: List[Any] = []
+        if botId:
+            filters.append(model.bot_id == botId)
+        if symbol:
+            filters.append(model.symbol == symbol)
+        if sources:
+            filters.append(model.data_source.in_(sources))
+        if day:
+            if hasattr(model, "day_utc"):
+                filters.append(getattr(model, "day_utc") == day)
+            else:
+                filters.append(func.date(model.ts_utc) == day)
+        return filters
+
     def _count(model, source: str) -> int:
-        return int(db.query(func.count(model.id)).filter(model.data_source == source).scalar() or 0)
+        return int(
+            db.query(func.count(model.id))
+            .filter(and_(*_filters(model), model.data_source == source))
+            .scalar()
+            or 0
+        )
 
     bars = {
         "LIVE_WS": _count(Bar, DATA_SOURCE_LIVE_WS),
         "IMPORT": _count(Bar, DATA_SOURCE_IMPORT),
+        "CACHED": _count(Bar, DATA_SOURCE_CACHED),
         "SIMULATED": _count(Bar, DATA_SOURCE_SIMULATED),
         "ARCHIVED": _count(Bar, DATA_SOURCE_ARCHIVED),
     }
     trades = {
         "LIVE_WS": _count(TradeEvent, DATA_SOURCE_LIVE_WS),
         "IMPORT": _count(TradeEvent, DATA_SOURCE_IMPORT),
+        "CACHED": _count(TradeEvent, DATA_SOURCE_CACHED),
         "SIMULATED": _count(TradeEvent, DATA_SOURCE_SIMULATED),
         "ARCHIVED": _count(TradeEvent, DATA_SOURCE_ARCHIVED),
     }
-    return {"ok": True, "bars": bars, "trades": trades, "ts_utc": _utc_now().isoformat().replace("+00:00", "Z")}
+    return {
+        "ok": True,
+        "day": day,
+        "filters": {"botId": botId, "symbol": symbol, "source": source},
+        "bars": bars,
+        "trades": trades,
+        "ts_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+    }
 
 
-@router.get("/api/v1/data/days")
+@router.get("/api/v1/data/days_legacy")
 def data_days(
     symbol: Optional[str] = None,
     botId: Optional[str] = Query(None, alias="botId"),
-    source: str = Query("LIVE_WS,IMPORT", description="Comma separated: LIVE_WS,IMPORT,SIMULATED,ARCHIVED,ALL"),
+    source: str = Query("LIVE_WS,IMPORT", description="Comma separated: LIVE_WS,IMPORT,CACHED,SIMULATED,ARCHIVED,ALL"),
     limit: int = Query(3650, ge=1, le=20000),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -242,60 +282,64 @@ def data_days(
             filters.append(model.data_source.in_(sources))
         return filters
 
-    bars_q = (
+    bars_rows = (
         db.query(
-            func.date(Bar.ts_utc).label("day"),
-            Bar.bot_id.label("bot_id"),
-            Bar.symbol.label("symbol"),
-            Bar.data_source.label("data_source"),
+            Bar.day_utc.label("day"),
             func.count(Bar.id).label("bars_count"),
+            Bar.data_source.label("data_source"),
             func.min(Bar.ts_utc).label("first_ts"),
             func.max(Bar.ts_utc).label("last_ts"),
         )
         .filter(and_(*_base_filters(Bar)))
-        .group_by(func.date(Bar.ts_utc), Bar.bot_id, Bar.symbol, Bar.data_source)
-        .order_by(func.date(Bar.ts_utc).desc())
-        .limit(limit)
+        .group_by(Bar.day_utc, Bar.data_source)
+        .order_by(Bar.day_utc.desc())
+        .limit(limit * max(1, len(sources or [])))
+        .all()
     )
-    bars_rows = bars_q.all()
 
-    trades_q = (
+    trades_rows = (
         db.query(
-            func.date(TradeEvent.ts_utc).label("day"),
-            TradeEvent.bot_id.label("bot_id"),
-            TradeEvent.symbol.label("symbol"),
-            TradeEvent.data_source.label("data_source"),
+            TradeEvent.day_utc.label("day"),
             func.count(TradeEvent.id).label("trades_count"),
+            TradeEvent.data_source.label("data_source"),
         )
         .filter(and_(*_base_filters(TradeEvent)))
-        .group_by(func.date(TradeEvent.ts_utc), TradeEvent.bot_id, TradeEvent.symbol, TradeEvent.data_source)
+        .group_by(TradeEvent.day_utc, TradeEvent.data_source)
+        .all()
     )
-    trades_rows = trades_q.all()
 
-    trade_map: Dict[Tuple[str, str, str, str], int] = {}
-    for r in trades_rows:
-        key = (str(r.day), str(r.bot_id), str(r.symbol), str(r.data_source))
-        trade_map[key] = int(r.trades_count or 0)
-
-    items = []
+    # Aggregate by day with per-source counts (UI selector-friendly).
+    day_map: Dict[str, Dict[str, Any]] = {}
     for r in bars_rows:
         day_str = str(r.day)
-        key = (day_str, str(r.bot_id), str(r.symbol), str(r.data_source))
-        items.append(
+        if not day_str or day_str.lower() == "none":
+            continue
+        bucket = day_map.setdefault(
+            day_str,
             {
                 "day": day_str,
-                "symbol": r.symbol,
-                "botId": r.bot_id,
-                "source": r.data_source,
-                "bars_count": int(r.bars_count or 0),
-                "trades_count": trade_map.get(key, 0),
-                "first_ts_utc": _to_z(r.first_ts),
-                "last_ts_utc": _to_z(r.last_ts),
-                "gaps_count": None,
-                "notes": "",
-            }
+                "symbol": symbol,
+                "botId": botId,
+                "bars": {},
+                "trades": {},
+                "first_ts_utc": None,
+                "last_ts_utc": None,
+            },
         )
+        bucket["bars"][str(r.data_source)] = int(r.bars_count or 0)
+        first_ts = _to_z(r.first_ts)
+        last_ts = _to_z(r.last_ts)
+        if first_ts and (bucket["first_ts_utc"] is None or first_ts < bucket["first_ts_utc"]):
+            bucket["first_ts_utc"] = first_ts
+        if last_ts and (bucket["last_ts_utc"] is None or last_ts > bucket["last_ts_utc"]):
+            bucket["last_ts_utc"] = last_ts
 
+    for r in trades_rows:
+        day_str = str(r.day)
+        if day_str in day_map:
+            day_map[day_str]["trades"][str(r.data_source)] = int(r.trades_count or 0)
+
+    items = sorted(day_map.values(), key=lambda x: x["day"], reverse=True)[:limit]
     return {"ok": True, "days": items, "count": len(items)}
 
 
@@ -359,6 +403,7 @@ async def data_import(
                 symbol=symbol,
                 timeframe=timeframe,
                 ts_utc=ts,
+                day_utc=ts.date().isoformat(),
                 open=float(row["open"]),
                 high=float(row["high"]),
                 low=float(row["low"]),
@@ -435,13 +480,21 @@ def cleanup_preview(payload: Dict[str, Any], db: Session = Depends(get_db)) -> D
 
     delete_simulated = bool(rules.get("delete_simulated", True))
     archive_simulated = bool(rules.get("archive_simulated", False))
+    delete_cached = bool(rules.get("delete_cached", False))
+    archive_cached = bool(rules.get("archive_cached", False))
     delete_duplicates = bool(rules.get("delete_duplicates", True))
     drop_outliers = bool(rules.get("drop_outliers", True))
 
     # Bars: simulated
     bars_sim_q = db.query(func.count(Bar.id)).filter(and_(*_filters(Bar), Bar.data_source == DATA_SOURCE_SIMULATED))
     bars_sim = int(bars_sim_q.scalar() or 0)
-    plan["tables"]["bars"] = {"simulated": bars_sim}
+    bars_cached = int(
+        db.query(func.count(Bar.id))
+        .filter(and_(*_filters(Bar), Bar.data_source == DATA_SOURCE_CACHED))
+        .scalar()
+        or 0
+    )
+    plan["tables"]["bars"] = {"simulated": bars_sim, "cached": bars_cached}
 
     # Bars: outliers
     bars_out = 0
@@ -465,7 +518,7 @@ def cleanup_preview(payload: Dict[str, Any], db: Session = Depends(get_db)) -> D
           FROM bars
           WHERE 1=1
           {where}
-          GROUP BY bot_id, symbol, timeframe, ts_utc, data_source
+          GROUP BY bot_id, symbol, timeframe, ts_utc
           HAVING c > 1
         ) t
         """
@@ -493,7 +546,13 @@ def cleanup_preview(payload: Dict[str, Any], db: Session = Depends(get_db)) -> D
         .scalar()
         or 0
     )
-    plan["tables"]["trades"] = {"simulated": trades_sim}
+    trades_cached = int(
+        db.query(func.count(TradeEvent.id))
+        .filter(and_(*_filters(TradeEvent), TradeEvent.data_source == DATA_SOURCE_CACHED))
+        .scalar()
+        or 0
+    )
+    plan["tables"]["trades"] = {"simulated": trades_sim, "cached": trades_cached}
 
     token = secrets.token_urlsafe(16)
     _cleanup_tokens[token] = {"plan": plan, "created_at": _utc_now().isoformat()}
@@ -521,6 +580,8 @@ def cleanup_apply(payload: Dict[str, Any], db: Session = Depends(get_db)) -> Dic
 
     delete_simulated = bool(rules.get("delete_simulated", True))
     archive_simulated = bool(rules.get("archive_simulated", False))
+    delete_cached = bool(rules.get("delete_cached", False))
+    archive_cached = bool(rules.get("archive_cached", False))
     delete_duplicates = bool(rules.get("delete_duplicates", True))
     drop_outliers = bool(rules.get("drop_outliers", True))
 
@@ -533,37 +594,63 @@ def cleanup_apply(payload: Dict[str, Any], db: Session = Depends(get_db)) -> Dic
         return f
 
     changed = {"bars": 0, "trades": 0, "bars_deduped": 0, "bars_outliers": 0}
+
+    # Source cleanup: SIMULATED/CACHED -> ARCHIVED or delete.
+    sources_to_archive: List[str] = []
+    sources_to_delete: List[str] = []
     if archive_simulated:
+        sources_to_archive.append(DATA_SOURCE_SIMULATED)
+    elif delete_simulated:
+        sources_to_delete.append(DATA_SOURCE_SIMULATED)
+    if archive_cached:
+        sources_to_archive.append(DATA_SOURCE_CACHED)
+    elif delete_cached:
+        sources_to_delete.append(DATA_SOURCE_CACHED)
+
+    if sources_to_archive:
         changed["bars"] = int(
             db.query(Bar)
-            .filter(and_(*_filters(Bar), Bar.data_source == DATA_SOURCE_SIMULATED))
+            .filter(and_(*_filters(Bar), Bar.data_source.in_(sources_to_archive)))
             .update({Bar.data_source: DATA_SOURCE_ARCHIVED}, synchronize_session=False)
         )
         changed["trades"] = int(
             db.query(TradeEvent)
-            .filter(and_(*_filters(TradeEvent), TradeEvent.data_source == DATA_SOURCE_SIMULATED))
+            .filter(and_(*_filters(TradeEvent), TradeEvent.data_source.in_(sources_to_archive)))
             .update({TradeEvent.data_source: DATA_SOURCE_ARCHIVED}, synchronize_session=False)
         )
-    elif delete_simulated:
+    if sources_to_delete:
         changed["bars"] = int(
-            db.query(Bar).filter(and_(*_filters(Bar), Bar.data_source == DATA_SOURCE_SIMULATED)).delete(synchronize_session=False)
+            db.query(Bar)
+            .filter(and_(*_filters(Bar), Bar.data_source.in_(sources_to_delete)))
+            .delete(synchronize_session=False)
         )
         changed["trades"] = int(
-            db.query(TradeEvent).filter(and_(*_filters(TradeEvent), TradeEvent.data_source == DATA_SOURCE_SIMULATED)).delete(synchronize_session=False)
+            db.query(TradeEvent)
+            .filter(and_(*_filters(TradeEvent), TradeEvent.data_source.in_(sources_to_delete)))
+            .delete(synchronize_session=False)
         )
 
     db.commit()
 
     if delete_duplicates:
-        # Delete duplicate bar rows while keeping the smallest id per key.
+        # Delete duplicate bar rows by (bot_id, symbol, timeframe, ts_utc), preferring LIVE_WS > IMPORT > ARCHIVED > CACHED > SIMULATED.
         sql = """
         DELETE FROM bars
         WHERE id IN (
           SELECT id FROM (
             SELECT id,
                    ROW_NUMBER() OVER (
-                     PARTITION BY bot_id, symbol, timeframe, ts_utc, data_source
-                     ORDER BY id ASC
+                     PARTITION BY bot_id, symbol, timeframe, ts_utc
+                     ORDER BY
+                       CASE data_source
+                         WHEN 'LIVE_WS' THEN 1
+                         WHEN 'IMPORT' THEN 2
+                         WHEN 'ARCHIVED' THEN 3
+                         WHEN 'CACHED' THEN 4
+                         WHEN 'SIMULATED' THEN 5
+                         ELSE 9
+                       END,
+                       id ASC
                    ) AS rn
             FROM bars
             WHERE 1=1
@@ -585,11 +672,11 @@ def cleanup_apply(payload: Dict[str, Any], db: Session = Depends(get_db)) -> Dic
         changed["bars_deduped"] = int(getattr(result, "rowcount", 0) or 0)
 
     if drop_outliers:
-        # Safety: only clean outliers from SIMULATED/ARCHIVED by default.
+        # Safety: only clean outliers from non-live sources by default.
         out_q = (
             db.query(Bar)
             .filter(and_(*_filters(Bar)))
-            .filter(Bar.data_source.in_([DATA_SOURCE_SIMULATED, DATA_SOURCE_ARCHIVED]))
+            .filter(Bar.data_source.in_([DATA_SOURCE_SIMULATED, DATA_SOURCE_CACHED, DATA_SOURCE_ARCHIVED]))
             .filter((Bar.close <= 0) | (Bar.open <= 0) | (Bar.high <= 0) | (Bar.low <= 0) | (Bar.volume < 0))
         )
         changed["bars_outliers"] = int(out_q.delete(synchronize_session=False) or 0)

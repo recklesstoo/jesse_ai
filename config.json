@@ -3,7 +3,8 @@
     "mode": "PAPER",
     "timezone": "America/New_York",
     "log_level": "INFO",
-    "shadow_mode": false
+    "shadow_mode": false,
+    "execution_mode": "MANUAL_ONLY"
   },
   "risk": {
     "fixed_fractional_risk": 0.0025,
@@ -23,7 +24,7 @@
   "instruments": {
     "MNQ": {
       "tick_size": 0.25,
-      "tick_value": 0.50,
+      "tick_value": 0.5,
       "margin_requirement": 1320.0
     }
   },

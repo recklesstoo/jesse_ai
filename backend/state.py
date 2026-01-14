@@ -18,6 +18,7 @@ FEED_STALE_SEC_DEFAULT_1M = float(os.getenv("WYCKOFF_FEED_STALE_SEC_DEFAULT_1M",
 FEED_STALE_SEC_FALLBACK = float(os.getenv("WYCKOFF_FEED_STALE_SEC_FALLBACK", "10.0"))
 MONITOR_STALE_SEC_FALLBACK = float(os.getenv("WYCKOFF_MONITOR_STALE_SEC_FALLBACK", "30.0"))
 AI_MIN_LIVE_BARS = int(os.getenv("WYCKOFF_AI_MIN_LIVE_BARS", "50"))
+WS_STALE_SEC_FALLBACK = float(os.getenv("WYCKOFF_WS_STALE_SEC_FALLBACK", "2.0"))
 
 
 def _utc_now() -> datetime:
@@ -181,6 +182,7 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
         interval_sec = _parse_timeframe_seconds(state.get("timeframe"))
 
     feed_stale_sec = _compute_feed_stale_sec(interval_sec)
+    ws_stale_sec = max(WS_STALE_SEC_FALLBACK, min(10.0, feed_stale_sec))
 
     last_bar_rx_dt = _parse_dt(state.get("last_bar_rx_utc"))
     bar_age_sec: Optional[float] = None
@@ -200,20 +202,6 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
             monitor_interval_sec = None
     monitor_stale_sec = _compute_monitor_stale_sec(monitor_interval_sec)
 
-    if last_bar_rx_dt is None:
-        feed_status = "NO_FEED"
-    elif bar_age_sec is not None and bar_age_sec <= feed_stale_sec:
-        feed_status = "LIVE"
-    else:
-        feed_status = "STALE"
-
-    if last_monitor_rx_dt is None:
-        monitor_status = "NO_MONITOR"
-    elif monitor_age_sec is not None and monitor_age_sec <= monitor_stale_sec:
-        monitor_status = "OK"
-    else:
-        monitor_status = "STALE"
-
     nt_mode = _normalize_nt_mode(state.get("last_mode"))
     last_bar_payload_dt = _parse_dt(state.get("last_bar_payload_ts_utc"))
     last_bar_payload_iso = last_bar_payload_dt.isoformat().replace("+00:00", "Z") if last_bar_payload_dt is not None else None
@@ -225,11 +213,27 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     else:
         data_source = "NONE"
 
+    # "LIVE" in UI only means recent LIVE_WS bars; cached data can never be "LIVE".
+    if last_bar_rx_dt is None:
+        feed_status = "NO_FEED"
+    elif data_source == "LIVE_WS" and bar_age_sec is not None and bar_age_sec <= feed_stale_sec:
+        feed_status = "LIVE"
+    else:
+        feed_status = "STALE"
+
+    if last_monitor_rx_dt is None:
+        monitor_status = "NO_MONITOR"
+    elif monitor_age_sec is not None and monitor_age_sec <= monitor_stale_sec:
+        monitor_status = "OK"
+    else:
+        monitor_status = "STALE"
+
     return {
         "bot_id": bot_id,
         "feed_status": feed_status,
         "ws_connected": ws_connected,
         "ws_age_sec": ws_age_sec,
+        "ws_stale_sec": ws_stale_sec,
         "monitor_status": monitor_status,
         "bar_age_sec": bar_age_sec,
         "monitor_age_sec": monitor_age_sec,

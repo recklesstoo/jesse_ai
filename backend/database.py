@@ -44,6 +44,10 @@ def _sqlite_add_column(conn, table: str, column_ddl: str) -> None:
     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column_ddl}"))
 
 
+def _sqlite_create_index(conn, name: str, table: str, columns_sql: str) -> None:
+    conn.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({columns_sql})"))
+
+
 def ensure_schema() -> None:
     """
     Lightweight schema evolution for SQLite (no Alembic in this repo).
@@ -58,6 +62,7 @@ def ensure_schema() -> None:
         table_to_columns: Dict[str, Iterable[str]] = {
             "bars": (
                 "data_source TEXT DEFAULT 'LIVE_WS'",
+                "day_utc TEXT",
                 "ingested_at_utc DATETIME DEFAULT CURRENT_TIMESTAMP",
             ),
             "ai_signals": (
@@ -70,6 +75,7 @@ def ensure_schema() -> None:
             ),
             "trade_events": (
                 "data_source TEXT DEFAULT 'LIVE_WS'",
+                "day_utc TEXT",
                 "ingested_at_utc DATETIME DEFAULT CURRENT_TIMESTAMP",
             ),
             "system_events": (
@@ -90,3 +96,30 @@ def ensure_schema() -> None:
                 col_name = ddl.split()[0]
                 if col_name not in existing_cols:
                     _sqlite_add_column(conn, table, ddl)
+
+        # Indexes + backfills for day_utc based queries (avoids sqlite date() parsing edge-cases).
+        if "bars" in existing_tables:
+            _sqlite_create_index(conn, "idx_bars_bot_day", "bars", "bot_id, day_utc")
+            _sqlite_create_index(conn, "idx_bars_key", "bars", "bot_id, symbol, timeframe, ts_utc")
+            # Backfill if upgrading from older DBs.
+            conn.execute(
+                text(
+                    """
+                    UPDATE bars
+                    SET day_utc = COALESCE(date(ts_utc), substr(ts_utc, 1, 10))
+                    WHERE day_utc IS NULL OR day_utc = ''
+                    """
+                )
+            )
+
+        if "trade_events" in existing_tables:
+            _sqlite_create_index(conn, "idx_trade_events_bot_day", "trade_events", "bot_id, day_utc")
+            conn.execute(
+                text(
+                    """
+                    UPDATE trade_events
+                    SET day_utc = COALESCE(date(ts_utc), substr(ts_utc, 1, 10))
+                    WHERE day_utc IS NULL OR day_utc = ''
+                    """
+                )
+            )

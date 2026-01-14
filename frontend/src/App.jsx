@@ -3,11 +3,14 @@ import MLTrainingPanel from "./components/MLTrainingPanel";
 import ModelManager from "./components/ModelManager";
 import TrainingHistoryChart from "./components/TrainingHistoryChart";
 import ConfusionMatrixHeatmap from "./components/ConfusionMatrixHeatmap";
+import AIAssistantPanel from "./components/AIAssistantPanel";
+import DataManagerPanel from "./components/DataManagerPanel";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 const WS_BASE = API_BASE.replace(/^http/i, "ws");
 const BOT_ID = import.meta.env.VITE_BOT_ID || "bot-1";
 const PRICE_REFRESH_MS = Number(import.meta.env.VITE_PRICE_REFRESH_MS || 200);
+const EXEC_TOKEN_STORAGE_KEY = "wyckoff_exec_token";
 
 const formatNum = (value, digits = 2) => {
   if (value === null || value === undefined || Number.isNaN(value)) return "--";
@@ -44,7 +47,11 @@ const extractCommandPayload = (row) => {
 
 const statusClassFor = (event) => {
   if (!event) return "neutral";
-  if (event.startsWith("ACK_") || event === "DELIVERED") return "ok";
+  if (event.startsWith("ACK_")) {
+    if (event.includes("REJECT") || event.includes("IGNORE")) return "warn";
+    return "ok";
+  }
+  if (event === "DELIVERED") return "ok";
   if (event.includes("ERROR") || event.includes("IGNORED")) return "warn";
   return "neutral";
 };
@@ -443,6 +450,10 @@ export default function App() {
     monitor: null
   });
   const [monitorStatus, setMonitorStatus] = useState(null);
+  const [executionStatus, setExecutionStatus] = useState(null);
+  const [execModeOpen, setExecModeOpen] = useState(false);
+  const [execModeDraft, setExecModeDraft] = useState("MANUAL_ONLY");
+  const [execToken, setExecToken] = useState(() => localStorage.getItem(EXEC_TOKEN_STORAGE_KEY) || "");
 
   const [opsAssistantEnabled, setOpsAssistantEnabled] = useState(false);
   const [opsAssistantIncludeWeb, setOpsAssistantIncludeWeb] = useState(false);
@@ -454,6 +465,8 @@ export default function App() {
 
   const [dataSummary, setDataSummary] = useState(null);
   const [dataDays, setDataDays] = useState([]);
+  const [selectedDay, setSelectedDay] = useState("");
+  const [selectedDaySummary, setSelectedDaySummary] = useState(null);
   const [dataFilters, setDataFilters] = useState({
     symbol: "MNQ",
     botId: BOT_ID,
@@ -462,6 +475,8 @@ export default function App() {
   const [cleanupRules, setCleanupRules] = useState({
     delete_simulated: true,
     archive_simulated: false,
+    delete_cached: false,
+    archive_cached: false,
     delete_duplicates: true,
     drop_outliers: true
   });
@@ -826,7 +841,7 @@ export default function App() {
           botId: dataFilters.botId || "",
           source: dataFilters.source || "LIVE_WS,IMPORT"
         });
-        const res = await fetch(`${API_BASE}/api/v1/data/days?${qs.toString()}`);
+        const res = await fetch(`${API_BASE}/api/v1/data/days_legacy?${qs.toString()}`);
         if (!res.ok) return;
         const data = await res.json();
         setDataDays(data.days || []);
@@ -836,6 +851,31 @@ export default function App() {
     };
     loadDays();
   }, [dataFilters.symbol, dataFilters.botId, dataFilters.source]);
+
+  useEffect(() => {
+    if (!selectedDay && dataDays.length > 0) setSelectedDay(dataDays[0].day);
+  }, [dataDays, selectedDay]);
+
+  useEffect(() => {
+    const loadSelectedDay = async () => {
+      if (!selectedDay) return;
+      try {
+        const qs = new URLSearchParams({
+          day: selectedDay,
+          symbol: dataFilters.symbol || "",
+          botId: dataFilters.botId || "",
+          source: dataFilters.source || "LIVE_WS,IMPORT"
+        });
+        const res = await fetch(`${API_BASE}/api/v1/data/summary?${qs.toString()}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setSelectedDaySummary(data);
+      } catch (err) {
+        // ignore
+      }
+    };
+    loadSelectedDay();
+  }, [selectedDay, dataFilters.symbol, dataFilters.botId, dataFilters.source]);
 
   useEffect(() => {
     const pollMonitor = async () => {
@@ -855,6 +895,24 @@ export default function App() {
 
     pollMonitor();
     const timer = setInterval(pollMonitor, 2000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const pollExecution = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/execution/status?botId=${BOT_ID}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setExecutionStatus(data);
+        setExecModeDraft((data.execution_mode || "MANUAL_ONLY").toUpperCase());
+      } catch (err) {
+        // ignore
+      }
+    };
+
+    pollExecution();
+    const timer = setInterval(pollExecution, 3000);
     return () => clearInterval(timer);
   }, []);
 
@@ -1053,13 +1111,20 @@ export default function App() {
         body: JSON.stringify(payload)
       });
       const data = await res.json();
-      setError("command", null);
+      if (data?.ok === false && data?.ack?.status) {
+        setError("command", `ACK_${data.ack.status}: ${data.ack.reject_reason || data.ack.reason || ""}`.trim());
+        addToast(`Command ${data.ack.status}: ${data.ack.reject_reason || data.ack.reason || ""}`.trim(), "error");
+      } else {
+        setError("command", null);
+      }
+      const queuedId = data.queued?.id || `cmd_${Date.now()}`;
       setExecs((prev) => [
         {
-          id: data.queued?.id || `cmd_${Date.now()}`,
+          id: queuedId,
           action,
           qty: payload.qty,
-          ts: data.ts || new Date().toISOString()
+          ts: data.ts || new Date().toISOString(),
+          ack: data.ack || null
         },
         ...prev.slice(0, 12)
       ]);
@@ -1117,7 +1182,8 @@ export default function App() {
     return null;
   }, [feedState?.bar_age_sec]);
 
-  const activityOk = feedState?.feed_status === "LIVE";
+  const dataSource = (feedState?.data_source || "NONE").toUpperCase();
+  const feedOk = dataSource === "LIVE_WS" && feedState?.feed_status === "LIVE";
   const monitorOk = feedState?.monitor_status === "OK";
   const monitorAgeSec = useMemo(() => {
     const value = feedState?.monitor_age_sec;
@@ -1126,12 +1192,24 @@ export default function App() {
   }, [feedState?.monitor_age_sec]);
   const bridgeConnected = Boolean(feedState?.ws_connected);
   const ntMode = (feedState?.nt_mode || "UNKNOWN").toUpperCase();
-  const dataSource = (feedState?.data_source || "NONE").toUpperCase();
+  const platformMode = useMemo(() => {
+    if (feedOk) return "LIVE";
+    if (ntMode === "BACKTEST") return "BACKTEST";
+    return "UNKNOWN";
+  }, [feedOk, ntMode]);
+  const wsStaleSec = useMemo(() => {
+    const value = feedState?.ws_stale_sec;
+    if (value === null || value === undefined) return 2;
+    return Math.max(1, Math.round(Number(value)));
+  }, [feedState?.ws_stale_sec]);
   const wsAgeSec = useMemo(() => {
     const value = feedState?.ws_age_sec;
     if (value === null || value === undefined) return null;
     return Math.max(0, Math.round(Number(value)));
   }, [feedState?.ws_age_sec]);
+
+  const execMode = (executionStatus?.execution_mode || "MANUAL_ONLY").toUpperCase();
+  const execModeClass = execMode === "DISABLED" ? "pill-warn" : execMode === "LIVE_ALLOWED" ? "pill-ok" : "pill-warn";
 
   const lastExec = execs[0];
   const lastExecEvent = lastExec ? lastEventById[lastExec.id] || (lastExec.error ? "ERROR" : "SENT") : null;
@@ -1190,6 +1268,29 @@ export default function App() {
       addToast("Swarm plan updated", "success");
     } catch (err) {
       addToast("Swarm plan failed", "error");
+    }
+  };
+
+  const updateExecutionMode = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/execution/enable`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(execToken ? { "x-execution-token": execToken } : {})
+        },
+        body: JSON.stringify({ mode: execModeDraft })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        localStorage.setItem(EXEC_TOKEN_STORAGE_KEY, execToken || "");
+        addToast(`Execution mode: ${data.execution_mode}`, "success");
+        setExecModeOpen(false);
+      } else {
+        addToast(`Execution mode update failed: ${data.reason || data.error || "unknown"}`, "error");
+      }
+    } catch (err) {
+      addToast("Execution mode update failed", "error");
     }
   };
 
@@ -1325,7 +1426,7 @@ export default function App() {
             {bridgeConnected ? "CONNECTED" : "DISCONNECTED"}
           </span>
           <span className={`pill ${dataSource === "LIVE_WS" ? "pill-ok" : dataSource === "CACHED" ? "pill-warn" : ""}`}>
-            SRC {dataSource}
+            {dataSource === "CACHED" ? "DATA CACHED" : `SRC ${dataSource}`}
           </span>
           <span className={`pill ${healthOk ? "pill-ok" : "pill-warn"}`}>
             HEALTH {healthOk ? "OK" : "--"}
@@ -1338,15 +1439,21 @@ export default function App() {
           <span className={`pill ${ntMode === "LIVE" ? "pill-ok" : ntMode === "BACKTEST" ? "pill-warn" : ""}`}>
             NT MODE {ntMode}
           </span>
+          <span className={`pill ${platformMode === "LIVE" ? "pill-ok" : platformMode === "BACKTEST" ? "pill-warn" : "pill-warn"}`}>
+            MODE {platformMode}
+          </span>
           <span className="pill">LAT {latencyMs} MS</span>
-          <span className={`pill ${wsAgeSec !== null && wsAgeSec <= 2 ? "pill-ok" : "pill-warn"}`}>
+          <button className={`pill ${execModeClass}`} onClick={() => setExecModeOpen(true)}>
+            EXEC {execMode}
+          </button>
+          <span className={`pill ${wsAgeSec !== null && wsAgeSec <= wsStaleSec ? "pill-ok" : "pill-warn"}`}>
             WS AGE {wsAgeSec === null ? "--" : `${wsAgeSec}s`}
           </span>
-          <span className={`pill ${activityOk ? "pill-ok" : "pill-warn"}`}>
+          <span className={`pill ${feedOk ? "pill-ok" : "pill-warn"}`}>
             BAR AGE {feedAgeSec === null ? "--" : `${feedAgeSec}s`}
           </span>
-          <span className={`pill ${activityOk ? "pill-ok" : "pill-warn"}`}>
-            FEED {activityOk ? "OK" : feedState.feed_status === "NO_FEED" ? "NO FEED" : "STALE"}
+          <span className={`pill ${feedOk ? "pill-ok" : "pill-warn"}`}>
+            FEED {feedOk ? "OK" : feedState.feed_status === "NO_FEED" ? "NO FEED" : "STALE"}
           </span>
           <span className={`pill ${monitorOk ? "pill-ok" : "pill-warn"}`}>
             MON AGE {monitorAgeSec === null ? "--" : `${monitorAgeSec}s`}
@@ -1377,11 +1484,42 @@ export default function App() {
       )}
 
       <main className="grid">
+        {execModeOpen && (
+          <div className="modal">
+            <div className="modal-backdrop" onClick={() => setExecModeOpen(false)} />
+            <div className="modal-panel">
+              <div className="modal-header">
+                <div className="label">EXECUTION MODE</div>
+                <button onClick={() => setExecModeOpen(false)}>CLOSE</button>
+              </div>
+              <div className="config-grid">
+                <label>
+                  Mode
+                  <select value={execModeDraft} onChange={(e) => setExecModeDraft(e.target.value)}>
+                    <option value="DISABLED">DISABLED</option>
+                    <option value="MANUAL_ONLY">MANUAL_ONLY</option>
+                    <option value="LIVE_ALLOWED">LIVE_ALLOWED</option>
+                  </select>
+                </label>
+                <label>
+                  Token (optional)
+                  <input value={execToken} onChange={(e) => setExecToken(e.target.value)} placeholder="x-execution-token" />
+                </label>
+              </div>
+              <div className="signal-hint" style={{ marginTop: 10 }}>
+                {executionStatus?.token_required ? "Token required." : "Token not required (set WYCKOFF_EXECUTION_TOKEN to protect)."}
+              </div>
+              <button className="pill pill-action" onClick={updateExecutionMode} style={{ marginTop: 10 }}>
+                APPLY
+              </button>
+            </div>
+          </div>
+        )}
         <section className="card price-card">
           <div className="card-header">
             <span className="label">SYMBOL</span>
-            <span className={`status-dot ${feedState.feed_status === "LIVE" ? "ok" : "warn"}`}>
-              {feedState.feed_status === "LIVE" ? "LIVE" : bar.timestamp ? "STALE" : "WAITING FOR NINJA"}
+            <span className={`status-dot ${feedOk ? "ok" : "warn"}`}>
+              {feedOk ? "LIVE" : dataSource === "CACHED" ? "DATA CACHED" : bar.timestamp ? "STALE" : "WAITING FOR NINJA"}
             </span>
           </div>
           <div className="price-row">
@@ -1584,7 +1722,10 @@ export default function App() {
                 </span>
                 <span className="muted">x{exe.qty}</span>
                 <span className="muted">{formatTime(exe.ts)}</span>
-                <span className="status">{lastEventById[exe.id] || "SENT"}</span>
+                <span className="status">
+                  {lastEventById[exe.id] || (exe.ack?.status ? `ACK_${exe.ack.status}` : "SENT")}
+                  {(exe.ack?.reject_reason || exe.ack?.reason) ? ` (${exe.ack.reject_reason || exe.ack.reason})` : ""}
+                </span>
               </div>
             ))}
           </div>
@@ -1762,144 +1903,9 @@ export default function App() {
           </div>
         </section>
 
-        <section className="card">
-          <div className="card-header">
-            <span className="label">DATA MANAGER</span>
-          </div>
-          <div className="calendar-meta" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
-            <div>
-              <div className="label">BARS LIVE</div>
-              <div className="value">{dataSummary?.bars?.LIVE_WS ?? "--"}</div>
-            </div>
-            <div>
-              <div className="label">BARS IMPORT</div>
-              <div className="value">{dataSummary?.bars?.IMPORT ?? "--"}</div>
-            </div>
-            <div>
-              <div className="label">BARS SIM</div>
-              <div className="value">{dataSummary?.bars?.SIMULATED ?? "--"}</div>
-            </div>
-            <div>
-              <div className="label">BARS ARCH</div>
-              <div className="value">{dataSummary?.bars?.ARCHIVED ?? "--"}</div>
-            </div>
-          </div>
+        <DataManagerPanel />
 
-          <div className="config-grid" style={{ marginTop: 10 }}>
-            <label>
-              Symbol
-              <input value={dataFilters.symbol} onChange={(e) => setDataFilters((p) => ({ ...p, symbol: e.target.value }))} />
-            </label>
-            <label>
-              BotId
-              <input value={dataFilters.botId} onChange={(e) => setDataFilters((p) => ({ ...p, botId: e.target.value }))} />
-            </label>
-            <label>
-              Sources
-              <input value={dataFilters.source} onChange={(e) => setDataFilters((p) => ({ ...p, source: e.target.value }))} />
-            </label>
-          </div>
-
-          <div className="list" style={{ marginTop: 10 }}>
-            {dataDays.length === 0 && <div className="muted">No days found (or filtered out).</div>}
-            {dataDays.slice(0, 20).map((d) => (
-              <div key={`${d.day}-${d.botId}-${d.symbol}-${d.source}`} className="list-item">
-                <span className="muted">{d.day}</span>
-                <span className="muted">{d.symbol}</span>
-                <span className="muted">{d.source}</span>
-                <span className="muted">bars {d.bars_count}</span>
-                <span className="muted">trades {d.trades_count}</span>
-              </div>
-            ))}
-          </div>
-
-          <div className="signal-hint" style={{ marginTop: 10 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>Import Data (CSV/JSON)</div>
-            <div className="config-grid">
-              <label>
-                Symbol
-                <input value={importMeta.symbol} onChange={(e) => setImportMeta((p) => ({ ...p, symbol: e.target.value }))} />
-              </label>
-              <label>
-                Timeframe
-                <input value={importMeta.timeframe} onChange={(e) => setImportMeta((p) => ({ ...p, timeframe: e.target.value }))} />
-              </label>
-              <label>
-                BotId
-                <input value={importMeta.botId} onChange={(e) => setImportMeta((p) => ({ ...p, botId: e.target.value }))} />
-              </label>
-            </div>
-            <input type="file" ref={importFileRef} style={{ marginTop: 8 }} />
-            <button className="pill pill-action" onClick={importData} style={{ marginTop: 8 }}>
-              IMPORT
-            </button>
-            {importResult && (
-              <div className="muted" style={{ marginTop: 6 }}>
-                {JSON.stringify(importResult)}
-              </div>
-            )}
-          </div>
-
-          <div className="signal-hint" style={{ marginTop: 10 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>Cleanup (dry-run + confirm token)</div>
-            <div className="config-grid">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={cleanupRules.delete_simulated}
-                  onChange={(e) => setCleanupRules((p) => ({ ...p, delete_simulated: e.target.checked }))}
-                />
-                Delete simulated
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={cleanupRules.archive_simulated}
-                  onChange={(e) => setCleanupRules((p) => ({ ...p, archive_simulated: e.target.checked }))}
-                />
-                Archive simulated
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={cleanupRules.delete_duplicates}
-                  onChange={(e) => setCleanupRules((p) => ({ ...p, delete_duplicates: e.target.checked }))}
-                />
-                Dedupe
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={cleanupRules.drop_outliers}
-                  onChange={(e) => setCleanupRules((p) => ({ ...p, drop_outliers: e.target.checked }))}
-                />
-                Drop outliers (SIM/ARCH)
-              </label>
-            </div>
-            <button className="pill pill-action" onClick={previewCleanup} style={{ marginTop: 8 }}>
-              PREVIEW CLEANUP
-            </button>
-            {cleanupPreview?.plan && (
-              <div className="muted" style={{ marginTop: 6 }}>
-                token: {cleanupPreview.confirm_token}
-                <div>{JSON.stringify(cleanupPreview.plan.tables)}</div>
-              </div>
-            )}
-            {cleanupPreview?.confirm_token && (
-              <>
-                <input
-                  style={{ marginTop: 8 }}
-                  placeholder="Paste confirm token to apply"
-                  value={cleanupConfirm}
-                  onChange={(e) => setCleanupConfirm(e.target.value)}
-                />
-                <button className="pill pill-warn" onClick={applyCleanup} style={{ marginTop: 8 }}>
-                  APPLY CLEANUP
-                </button>
-              </>
-            )}
-          </div>
-        </section>
+        <AIAssistantPanel botId={BOT_ID} />
 
         <section className="card chat-card">
           <div className="card-header">

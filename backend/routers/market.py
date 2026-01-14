@@ -20,7 +20,14 @@ from backend.compat import (
     update_ai_signal,
     update_bot_state,
 )
-from backend.config import get_shadow_decisions, is_shadow_mode, log_shadow_decision
+from backend.config import (
+    EXECUTION_MODE_DISABLED,
+    EXECUTION_MODE_MANUAL_ONLY,
+    get_execution_mode,
+    get_shadow_decisions,
+    is_shadow_mode,
+    log_shadow_decision,
+)
 from backend.database import SessionLocal, get_db
 from backend.models import Bar, CommandEvent
 from backend.schemas import (
@@ -106,33 +113,73 @@ async def post_command(bot_id: str, cmd: CommandIn) -> Dict[str, Any]:
         )
         ws = ws_bots.get(bot_id)
 
-    if ws is not None:
-        try:
-            payload = {**queued, "id": cmd_id}
-            await ws.send_text(json.dumps(payload, ensure_ascii=False))
-            async with state_lock:
-                _update_log_event(bot_id, cmd_id, "DELIVERED", {"queued": queued})
-        except Exception:
-            async with state_lock:
-                _update_log_event(bot_id, cmd_id, "ERROR_DELIVERY", {"queued": queued})
-    else:
-        async def _simulate_ack() -> None:
-            await asyncio.sleep(0.25)
-            ack_payload = {
-                "id": cmd_id,
-                "status": "SIMULATED",
-                "reason": "No bridge connected; command accepted locally.",
-                "ts": _iso(datetime.utcnow()),
-            }
-            async with state_lock:
-                _update_log_event(bot_id, cmd_id, "ACK_SIMULATED", {"queued": queued, "ack": ack_payload})
+    execution_mode = get_execution_mode()
+    tag = str(queued.get("tag") or "").strip().lower()
+    manual_tags = {"manual", "limit"}
 
-        asyncio.create_task(_simulate_ack())
+    if execution_mode == EXECUTION_MODE_DISABLED:
+        ack_payload = {
+            "id": cmd_id,
+            "status": "REJECTED",
+            "reason": "execution disabled by policy",
+            "reject_reason": "execution disabled by policy",
+            "execution_mode": execution_mode,
+            "ts": _iso(datetime.utcnow()),
+        }
+        async with state_lock:
+            _update_log_event(bot_id, cmd_id, "ACK_REJECTED", {"queued": queued, "ack": ack_payload})
+        return {"ok": False, "ts": queued_at, "queued": queued, "ack": ack_payload}
 
+    if execution_mode == EXECUTION_MODE_MANUAL_ONLY and tag not in manual_tags:
+        ack_payload = {
+            "id": cmd_id,
+            "status": "REJECTED",
+            "reason": "manual-only policy",
+            "reject_reason": f"execution mode MANUAL_ONLY (tag '{tag}' not allowed)",
+            "execution_mode": execution_mode,
+            "ts": _iso(datetime.utcnow()),
+        }
+        async with state_lock:
+            _update_log_event(bot_id, cmd_id, "ACK_REJECTED", {"queued": queued, "ack": ack_payload})
+        return {"ok": False, "ts": queued_at, "queued": queued, "ack": ack_payload}
+
+    # Compatibility: always enqueue allowed commands (even if the bot WS is offline),
+    # so `/api/v1/commands/{botId}` can be used by test harnesses/debug tools.
     queue = await get_queue(bot_id)
     await queue.put(queued)
 
-    return {"ts": queued_at, "queued": queued}
+    if ws is None:
+        ack_payload = {
+            "id": cmd_id,
+            "status": "IGNORED",
+            "reason": "bot not connected",
+            "reject_reason": "bot not connected (ws not open)",
+            "execution_mode": execution_mode,
+            "ts": _iso(datetime.utcnow()),
+        }
+        async with state_lock:
+            _update_log_event(bot_id, cmd_id, "ACK_IGNORED", {"queued": queued, "ack": ack_payload})
+        return {"ok": False, "ts": queued_at, "queued": queued, "ack": ack_payload}
+
+    try:
+        payload = {**queued, "id": cmd_id}
+        await ws.send_text(json.dumps(payload, ensure_ascii=False))
+        async with state_lock:
+            _update_log_event(bot_id, cmd_id, "DELIVERED", {"queued": queued})
+    except Exception:
+        ack_payload = {
+            "id": cmd_id,
+            "status": "IGNORED",
+            "reason": "ws delivery failed",
+            "reject_reason": "ws send_text failed (delivery error)",
+            "execution_mode": execution_mode,
+            "ts": _iso(datetime.utcnow()),
+        }
+        async with state_lock:
+            _update_log_event(bot_id, cmd_id, "ACK_IGNORED", {"queued": queued, "ack": ack_payload})
+        return {"ok": False, "ts": queued_at, "queued": queued, "ack": ack_payload}
+
+    return {"ok": True, "ts": queued_at, "queued": queued, "execution_mode": execution_mode}
 
 
 @router.post("/api/v1/commands/{bot_id}/ack")
@@ -141,6 +188,9 @@ async def command_ack(bot_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     status = (payload.get("status") or "ACK").upper()
     if not cmd_id:
         return {"ok": False, "reason": "missing_id"}
+    if status.startswith("SIM"):
+        status = "REJECTED"
+        payload = {**payload, "status": status, "reason": payload.get("reason") or "simulated acks disabled"}
 
     async with state_lock:
         _update_log_event(bot_id, cmd_id, f"ACK_{status}", {"ack": payload})

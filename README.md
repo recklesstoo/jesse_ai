@@ -73,16 +73,30 @@ Important: the orchestrator/swarm is **read-only** and does not execute trades.
 
 - `POST /api/v1/ai-order` is disabled on purpose (403). The dashboard can show signals, but execution must be manual.
 
+## AI Assistant (no orders)
+
+The Advanced AI Assistant is a read-only operator. It can summarize health, diagnose WS/feed issues, rank bots, analyze events/data quality, and suggest actions — but it **never places or executes trades**.
+
+- Capabilities: `GET http://127.0.0.1:8000/api/v1/ai/capabilities`
+- Context snapshot: `GET http://127.0.0.1:8000/api/v1/ai/context?botId=bot-1`
+- Chat: `POST http://127.0.0.1:8000/api/v1/ai/chat` body `{ "message": "...", "botId": "bot-1", "tools": false }`
+
+Logs: `logs/ai_assistant.log` (and `logs/ai_web.log` only if web tools are enabled/configured).
+
 ## Data Manager (import + cleanup)
 
 The backend stores bars/trades with a `data_source`:
 `LIVE_WS | IMPORT | CACHED | SIMULATED | ARCHIVED` and all timestamps are treated as UTC.
 
-- Summary totals (optionally per day): `GET http://127.0.0.1:8000/api/v1/data/summary` and `GET http://127.0.0.1:8000/api/v1/data/summary?day=YYYY-MM-DD&symbol=MNQ`
-- Days available: `GET http://127.0.0.1:8000/api/v1/data/days?symbol=MNQ&botId=bot-1&source=LIVE_WS,IMPORT`
-- Import (explicit): `POST http://127.0.0.1:8000/api/v1/data/import` (multipart CSV/JSON)
-- Cleanup (explicit, safe by default):
-  - Preview: `POST http://127.0.0.1:8000/api/v1/data/cleanup/preview` returns `confirm_token`
-  - Apply: `POST http://127.0.0.1:8000/api/v1/data/cleanup/apply` with `confirm_token`
+- V2 Days available (SQLite table `data_bars`): `GET http://127.0.0.1:8000/api/v1/data/days?symbol=MNQ&timeframe=1m`
+- V2 Ingest CSV (explicit): `POST http://127.0.0.1:8000/api/v1/data/ingest` (multipart)
+- V2 Clean (explicit): `POST http://127.0.0.1:8000/api/v1/data/clean` with `{ "dryRun": true, "rules": {...} }`
+- Legacy (existing bars tables):
+  - Summary totals (optionally per day): `GET http://127.0.0.1:8000/api/v1/data/summary` and `GET http://127.0.0.1:8000/api/v1/data/summary?day=YYYY-MM-DD&symbol=MNQ`
+  - Days available (legacy shape): `GET http://127.0.0.1:8000/api/v1/data/days_legacy?symbol=MNQ&botId=bot-1&source=LIVE_WS,IMPORT`
+  - Import (explicit): `POST http://127.0.0.1:8000/api/v1/data/import` (multipart CSV/JSON)
+  - Cleanup (explicit, token-confirmed):
+    - Preview: `POST http://127.0.0.1:8000/api/v1/data/cleanup/preview` returns `confirm_token`
+    - Apply: `POST http://127.0.0.1:8000/api/v1/data/cleanup/apply` with `confirm_token`
 
-The UI includes a **Data Manager** card for summary, day listing, import, and cleanup preview/apply.
+Logs: `logs/data_manager.log`.

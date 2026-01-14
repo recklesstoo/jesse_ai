@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -27,8 +28,56 @@ def load_config() -> Dict[str, Any]:
     return {}
 
 
+def save_config(next_config: Dict[str, Any]) -> bool:
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        with tmp.open("w", encoding="utf-8") as writer:
+            json.dump(next_config, writer, ensure_ascii=False, indent=2)
+            writer.write("\n")
+        tmp.replace(CONFIG_PATH)
+        return True
+    except Exception as exc:
+        print(f"[config] Error saving config.json: {exc}")
+        return False
+
+
 def is_shadow_mode() -> bool:
     return bool(load_config().get("system", {}).get("shadow_mode", False))
+
+
+EXECUTION_MODE_DISABLED = "DISABLED"
+EXECUTION_MODE_MANUAL_ONLY = "MANUAL_ONLY"
+EXECUTION_MODE_LIVE_ALLOWED = "LIVE_ALLOWED"
+
+
+def _normalize_execution_mode(value: Any) -> str:
+    raw = (str(value or "")).strip().upper()
+    if raw in (EXECUTION_MODE_DISABLED, EXECUTION_MODE_MANUAL_ONLY, EXECUTION_MODE_LIVE_ALLOWED):
+        return raw
+    return EXECUTION_MODE_MANUAL_ONLY
+
+
+def get_execution_mode() -> str:
+    env = os.getenv("WYCKOFF_EXECUTION_MODE")
+    if env:
+        return _normalize_execution_mode(env)
+    cfg = load_config()
+    return _normalize_execution_mode(cfg.get("system", {}).get("execution_mode"))
+
+
+def set_execution_mode(mode: str) -> tuple[bool, str]:
+    normalized = _normalize_execution_mode(mode)
+    cfg = load_config()
+    cfg.setdefault("system", {})["execution_mode"] = normalized
+    ok = save_config(cfg)
+    return ok, normalized
+
+
+def get_execution_token() -> Optional[str]:
+    token = os.getenv("WYCKOFF_EXECUTION_TOKEN")
+    token = token.strip() if token else None
+    return token or None
 
 
 def init_shadow_db() -> None:

@@ -9,6 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.config import init_shadow_db
 from backend.database import Base, engine, ensure_schema
 from backend.routers.health import router as health_router
+from backend.routers.execution import router as execution_router
+from backend.routers.ai import router as ai_router
+from backend.routers.data_manager import router as data_manager_router
 from backend.routers.market import router as market_router
 from backend.routers.ops import router as ops_router
 from backend.ws.server import (
@@ -51,6 +54,9 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
+app.include_router(execution_router)
+app.include_router(ai_router)
+app.include_router(data_manager_router)
 app.include_router(market_router)
 app.include_router(ops_router)
 
