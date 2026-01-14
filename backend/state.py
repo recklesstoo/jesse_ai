@@ -218,6 +218,13 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     last_bar_payload_dt = _parse_dt(state.get("last_bar_payload_ts_utc"))
     last_bar_payload_iso = last_bar_payload_dt.isoformat().replace("+00:00", "Z") if last_bar_payload_dt is not None else None
 
+    if ws_connected:
+        data_source = "LIVE_WS"
+    elif state.get("last_price") is not None or last_bar_rx_dt is not None:
+        data_source = "CACHED"
+    else:
+        data_source = "NONE"
+
     return {
         "bot_id": bot_id,
         "feed_status": feed_status,
@@ -229,11 +236,14 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
         "feed_stale_sec": feed_stale_sec,
         "monitor_stale_sec": monitor_stale_sec,
         "nt_mode": nt_mode,
+        "data_source": data_source,
         "last_mode": state.get("last_mode"),
         "last_bar_ts_utc": last_bar_payload_iso,
         "last_bar_rx_utc": _iso(last_bar_rx_dt),
         "last_monitor_rx_utc": _iso(last_monitor_rx_dt),
         "bar_interval_ms": bar_interval_ms,
+        "instrument": state.get("instrument"),
+        "timeframe_text": state.get("timeframe"),
         "last_symbol": state.get("instrument"),
         "last_timeframe": state.get("timeframe"),
         "last_price": state.get("last_price"),

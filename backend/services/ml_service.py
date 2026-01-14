@@ -11,10 +11,9 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from backend.models import Bar
+from backend.models import Bar, DATA_SOURCE_ARCHIVED, DATA_SOURCE_IMPORT, DATA_SOURCE_LIVE_WS, DATA_SOURCE_SIMULATED
 
 MODEL_DIR = Path(__file__).resolve().parents[1] / "trained_models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -75,7 +74,9 @@ class MLService:
             query = (
                 db.query(Bar)
                 .filter(Bar.bot_id == bot_id)
-                .filter(or_(Bar.mode.is_(None), ~Bar.mode.ilike("SIM%")))
+                .filter(Bar.data_source.in_([DATA_SOURCE_LIVE_WS, DATA_SOURCE_IMPORT]))
+                .filter(Bar.data_source != DATA_SOURCE_SIMULATED)
+                .filter(Bar.data_source != DATA_SOURCE_ARCHIVED)
                 .order_by(Bar.ts_utc.asc())
             )
             df = pd.read_sql(query.statement, db.bind)

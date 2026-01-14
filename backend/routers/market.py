@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -246,24 +247,16 @@ async def signals_history(botId: str = Query("bot-1", alias="botId"), limit: int
 async def list_bots() -> Dict[str, Any]:
     async with state_lock:
         snapshot = {bot_id: dict(state) for bot_id, state in bot_state.items()}
-    return {"ok": True, "bots": snapshot}
+        computed = {bot_id: compute_feed_status(bot_id) for bot_id in snapshot.keys()}
+    return {"ok": True, "bots": snapshot, "computed": computed}
 
 
 @router.post("/api/v1/ai-order")
 async def ai_order(payload: Dict[str, Any]) -> Dict[str, Any]:
-    bot_id = payload.get("botId") or payload.get("bot_id") or "bot-1"
-    action = payload.get("action") or "NONE"
-    if action == "NONE":
-        return {"ok": False, "reason": "NONE"}
-    cmd = CommandIn(
-        action=action,
-        qty=int(payload.get("qty") or 0),
-        slTicks=int(payload.get("slTicks") or 0),
-        tpTicks=int(payload.get("tpTicks") or 0),
-        tag=payload.get("tag") or "ai",
-        symbol=payload.get("symbol") or "MNQ",
+    raise HTTPException(
+        status_code=403,
+        detail="AI execution is disabled. Use manual controls; swarm/orchestrator is read-only.",
     )
-    return await post_command(bot_id, cmd)
 
 
 @router.get("/api/v1/wyckoff/config")

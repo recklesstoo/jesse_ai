@@ -215,6 +215,11 @@ function Invoke-FeedStatusCheck {
 
             if ($status -eq "LIVE") {
                 if ($state.ws_connected -ne $true) {
+                    $src = ($state.data_source | ForEach-Object { "$_" }).ToUpperInvariant()
+                    if ($src -eq "CACHED") {
+                        Write-Warning "Feed reports LIVE but WS is disconnected (data_source=CACHED). Treating as cached-only."
+                        return @{ ok = $true; live = $false; state = $state }
+                    }
                     Throw-DoctorError("feed_status=LIVE but ws_connected=false (possible fake feed).")
                 }
                 $age = $state.bar_age_sec

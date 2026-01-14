@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -9,6 +10,10 @@ from backend.config import is_shadow_mode
 from backend.state import _get_bot_state, _utc_now, bot_state, state_lock
 
 router = APIRouter()
+
+@router.get("/api/v1/debug/pid")
+async def debug_pid() -> Dict[str, Any]:
+    return {"ok": True, "pid": os.getpid(), "ppid": os.getppid()}
 
 
 @router.get("/api/v1/health")

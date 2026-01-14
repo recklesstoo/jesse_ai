@@ -11,6 +11,11 @@ from backend.database import Base
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
+DATA_SOURCE_LIVE_WS = "LIVE_WS"
+DATA_SOURCE_IMPORT = "IMPORT"
+DATA_SOURCE_SIMULATED = "SIMULATED"
+DATA_SOURCE_ARCHIVED = "ARCHIVED"
+
 
 class Bar(Base):
     __tablename__ = "bars"
@@ -26,6 +31,8 @@ class Bar(Base):
     close = Column(Float)
     volume = Column(Integer)
     mode = Column(String, default="LIVE")
+    data_source = Column(String, default=DATA_SOURCE_LIVE_WS, index=True)
+    ingested_at_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (Index("idx_bars_bot_ts", "bot_id", "ts_utc"),)
@@ -56,6 +63,8 @@ class AISignal(Base):
     explain = Column(String)
     features = Column(JSON)
     model_version = Column(String)
+    data_source = Column(String, default=DATA_SOURCE_LIVE_WS, index=True)
+    ingested_at_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
 
 
 class BotConfig(Base):
@@ -74,6 +83,8 @@ class MonitorSnapshot(Base):
     bot_id = Column(String, index=True)
     ts_utc = Column(DateTime(timezone=True), default=utc_now)
     data = Column(JSON)
+    data_source = Column(String, default=DATA_SOURCE_LIVE_WS, index=True)
+    ingested_at_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
 
 
 class TradeEvent(Base):
@@ -91,3 +102,16 @@ class TradeEvent(Base):
     order_id = Column(String)
     order_name = Column(String)
     payload = Column(JSON)
+    data_source = Column(String, default=DATA_SOURCE_LIVE_WS, index=True)
+    ingested_at_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class SystemEvent(Base):
+    __tablename__ = "system_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ts_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
+    bot_id = Column(String, index=True)
+    event_type = Column(String, index=True)
+    data = Column(JSON)
+    data_source = Column(String, default=DATA_SOURCE_LIVE_WS, index=True)

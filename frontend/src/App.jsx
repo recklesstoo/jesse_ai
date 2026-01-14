@@ -429,7 +429,6 @@ export default function App() {
   const [autoConfig, setAutoConfig] = useState(null);
   const [autoSaving, setAutoSaving] = useState(false);
   const [aiSignal, setAiSignal] = useState(null);
-  const [aiSending, setAiSending] = useState(false);
   const [aiHistory, setAiHistory] = useState([]);
   const [calendarEvents, setCalendarEvents] = useState([]);
   const [calendarStatus, setCalendarStatus] = useState(null);
@@ -444,6 +443,33 @@ export default function App() {
     monitor: null
   });
   const [monitorStatus, setMonitorStatus] = useState(null);
+
+  const [opsAssistantEnabled, setOpsAssistantEnabled] = useState(false);
+  const [opsAssistantIncludeWeb, setOpsAssistantIncludeWeb] = useState(false);
+
+  const [botsRegistry, setBotsRegistry] = useState(null);
+  const [eventTimeline, setEventTimeline] = useState([]);
+  const [swarmRank, setSwarmRank] = useState([]);
+  const [swarmPlan, setSwarmPlan] = useState([]);
+
+  const [dataSummary, setDataSummary] = useState(null);
+  const [dataDays, setDataDays] = useState([]);
+  const [dataFilters, setDataFilters] = useState({
+    symbol: "MNQ",
+    botId: BOT_ID,
+    source: "LIVE_WS,IMPORT"
+  });
+  const [cleanupRules, setCleanupRules] = useState({
+    delete_simulated: true,
+    archive_simulated: false,
+    delete_duplicates: true,
+    drop_outliers: true
+  });
+  const [cleanupPreview, setCleanupPreview] = useState(null);
+  const [cleanupConfirm, setCleanupConfirm] = useState("");
+  const [importMeta, setImportMeta] = useState({ symbol: "MNQ", timeframe: "1min", botId: "import" });
+  const [importResult, setImportResult] = useState(null);
+  const importFileRef = useRef(null);
 
   const [toasts, setToasts] = useState([]);
   const addToast = (msg, type = "info") => {
@@ -725,6 +751,91 @@ export default function App() {
     metricsTimerRef.current = setInterval(pollMetrics, 3000);
     return () => clearInterval(metricsTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    const pollBots = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/bots`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setBotsRegistry(data);
+      } catch (err) {
+        // ignore
+      }
+    };
+    pollBots();
+    const timer = setInterval(pollBots, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const pollEvents = async () => {
+      try {
+        const qs = new URLSearchParams({ limit: "200" });
+        const res = await fetch(`${API_BASE}/api/v1/events?${qs.toString()}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const items = (data.events || []).filter((ev) => !BOT_ID || ev.botId === BOT_ID);
+        setEventTimeline(items);
+      } catch (err) {
+        // ignore
+      }
+    };
+    pollEvents();
+    const timer = setInterval(pollEvents, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const pollSwarm = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/swarm/rank?limit=10`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setSwarmRank(data.rank || []);
+      } catch (err) {
+        // ignore
+      }
+    };
+    pollSwarm();
+    const timer = setInterval(pollSwarm, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const pollDataSummary = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/data/summary`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setDataSummary(data);
+      } catch (err) {
+        // ignore
+      }
+    };
+    pollDataSummary();
+    const timer = setInterval(pollDataSummary, 10000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const loadDays = async () => {
+      try {
+        const qs = new URLSearchParams({
+          symbol: dataFilters.symbol || "",
+          botId: dataFilters.botId || "",
+          source: dataFilters.source || "LIVE_WS,IMPORT"
+        });
+        const res = await fetch(`${API_BASE}/api/v1/data/days?${qs.toString()}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setDataDays(data.days || []);
+      } catch (err) {
+        // ignore
+      }
+    };
+    loadDays();
+  }, [dataFilters.symbol, dataFilters.botId, dataFilters.source]);
 
   useEffect(() => {
     const pollMonitor = async () => {
@@ -1015,6 +1126,7 @@ export default function App() {
   }, [feedState?.monitor_age_sec]);
   const bridgeConnected = Boolean(feedState?.ws_connected);
   const ntMode = (feedState?.nt_mode || "UNKNOWN").toUpperCase();
+  const dataSource = (feedState?.data_source || "NONE").toUpperCase();
   const wsAgeSec = useMemo(() => {
     const value = feedState?.ws_age_sec;
     if (value === null || value === undefined) return null;
@@ -1034,19 +1146,30 @@ export default function App() {
   }, [bar.price, bar.symbol, bar.timestamp, botStatus.mode]);
 
   const sendChat = async () => {
-    if (!chatInput.trim()) return;
-    const next = [...chatMessages, { role: "user", content: chatInput.trim() }];
+    const messageText = chatInput.trim();
+    if (!messageText) return;
+    const next = [...chatMessages, { role: "user", content: messageText }];
     setChatMessages(next);
     setChatInput("");
 
     try {
-      const res = await fetch(`${API_BASE}/api/v1/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ botId: BOT_ID, messages: next.slice(-10) })
-      });
-      const data = await res.json();
-      setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply || "Sin respuesta." }]);
+      if (opsAssistantEnabled) {
+        const res = await fetch(`${API_BASE}/api/v1/assistant/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ botId: BOT_ID, message: messageText, includeWeb: opsAssistantIncludeWeb })
+        });
+        const data = await res.json();
+        setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply || "Sin respuesta." }]);
+      } else {
+        const res = await fetch(`${API_BASE}/api/v1/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ botId: BOT_ID, messages: next.slice(-10) })
+        });
+        const data = await res.json();
+        setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply || "Sin respuesta." }]);
+      }
     } catch (err) {
       setChatMessages((prev) => [
         ...prev,
@@ -1055,31 +1178,82 @@ export default function App() {
     }
   };
 
-  const sendAiOrder = async () => {
-    if (!aiSignal || !aiSignal.signal || aiSignal.signal === "NONE") return;
-    const action = aiSignal.bias === "BULLISH" ? "BUY" : aiSignal.bias === "BEARISH" ? "SELL" : "NONE";
-    if (action === "NONE") return;
-    setAiSending(true);
+  const generateSwarmPlan = async () => {
     try {
-      await fetch(`${API_BASE}/api/v1/ai-order`, {
+      const res = await fetch(`${API_BASE}/api/v1/swarm/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 5 })
+      });
+      const data = await res.json();
+      setSwarmPlan(data.plan || []);
+      addToast("Swarm plan updated", "success");
+    } catch (err) {
+      addToast("Swarm plan failed", "error");
+    }
+  };
+
+  const previewCleanup = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/data/cleanup/preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          botId: BOT_ID,
-          action,
-          qty: Number(qty) || 1,
-          slTicks: Number(slTicks) || 0,
-          tpTicks: Number(tpTicks) || 0,
-          tag: "ai",
-          symbol: bar.symbol || "MNQ",
-          confidence: aiSignal.confidence,
-          signal: aiSignal.signal
+          scope: { symbol: dataFilters.symbol || null, botId: dataFilters.botId || null },
+          rules: cleanupRules
         })
       });
+      const data = await res.json();
+      setCleanupPreview(data);
+      setCleanupConfirm("");
+      addToast("Cleanup preview ready", "success");
     } catch (err) {
-      setError("command", "AI order failed");
-    } finally {
-      setAiSending(false);
+      addToast("Cleanup preview failed", "error");
+    }
+  };
+
+  const applyCleanup = async () => {
+    const token = cleanupPreview?.confirm_token;
+    if (!token) return;
+    if (cleanupConfirm.trim() !== token) {
+      addToast("Confirmation token mismatch", "error");
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/data/cleanup/apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm_token: token })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        addToast("Cleanup applied", "success");
+        setCleanupPreview(null);
+        setCleanupConfirm("");
+      } else {
+        addToast(`Cleanup failed: ${data.error || "unknown"}`, "error");
+      }
+    } catch (err) {
+      addToast("Cleanup apply failed", "error");
+    }
+  };
+
+  const importData = async () => {
+    const file = importFileRef.current?.files?.[0];
+    if (!file) return;
+    setImportResult(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("symbol", importMeta.symbol);
+      fd.append("timeframe", importMeta.timeframe);
+      fd.append("botId", importMeta.botId);
+      const res = await fetch(`${API_BASE}/api/v1/data/import`, { method: "POST", body: fd });
+      const data = await res.json();
+      setImportResult(data);
+      addToast(data.ok ? "Import completed" : "Import failed", data.ok ? "success" : "error");
+    } catch (err) {
+      addToast("Import failed", "error");
     }
   };
 
@@ -1149,6 +1323,9 @@ export default function App() {
         <div className="status-pills">
           <span className={`pill ${bridgeConnected ? "pill-ok" : "pill-warn"}`}>
             {bridgeConnected ? "CONNECTED" : "DISCONNECTED"}
+          </span>
+          <span className={`pill ${dataSource === "LIVE_WS" ? "pill-ok" : dataSource === "CACHED" ? "pill-warn" : ""}`}>
+            SRC {dataSource}
           </span>
           <span className={`pill ${healthOk ? "pill-ok" : "pill-warn"}`}>
             HEALTH {healthOk ? "OK" : "--"}
@@ -1447,13 +1624,9 @@ export default function App() {
               {aiSignal.signal === "NONE" && aiSignal.explain?.includes("Insufficient") && (
                 <div className="signal-hint">Esperando 10+ barras para senales Wyckoff.</div>
               )}
-              <button
-                className="btn ai"
-                onClick={sendAiOrder}
-                disabled={aiSending || aiSignal.signal === "NONE"}
-              >
-                {aiSending ? "SENDING..." : "SEND AI ORDER"}
-              </button>
+              <div className="signal-hint">
+                Execution disabled: AI/Swarm only recommends. Use Manual Trade to execute.
+              </div>
             </>
           )}
         </section>
@@ -1523,10 +1696,223 @@ export default function App() {
           </section>
         )}
 
+        <section className="card">
+          <div className="card-header">
+            <span className="label">SWARM CONTROL (READ-ONLY)</span>
+            <button className="pill pill-action" onClick={generateSwarmPlan}>PLAN</button>
+          </div>
+          <div className="list">
+            {swarmRank.length === 0 && <div className="muted">No swarm data yet.</div>}
+            {swarmRank.slice(0, 10).map((row) => (
+              <div key={row.botId} className="list-item">
+                <span className="muted">{row.botId}</span>
+                <span className="muted">{row.instrument || "--"}</span>
+                <span className={`status ${row.feed_status === "LIVE" ? "ok" : "warn"}`}>{row.feed_status}</span>
+                <span className="muted">MODE {row.nt_mode || "UNKNOWN"}</span>
+                <span className="muted">SCORE {formatNum(row.score, 3)}</span>
+              </div>
+            ))}
+          </div>
+          {swarmPlan.length > 0 && (
+            <div className="signal-hint" style={{ marginTop: 10 }}>
+              {swarmPlan.map((p) => (
+                <div key={p.botId}>
+                  {p.botId}: {p.recommendation} ({p.reason})
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="card">
+          <div className="card-header">
+            <span className="label">BOTS REGISTRY</span>
+          </div>
+          {!botsRegistry && <div className="muted">Loading...</div>}
+          {botsRegistry && (
+            <div className="list">
+              {Object.keys(botsRegistry.computed || {}).length === 0 && <div className="muted">No bots yet.</div>}
+              {Object.entries(botsRegistry.computed || {}).map(([botId, st]) => (
+                <div key={botId} className="list-item">
+                  <span className="muted">{botId}</span>
+                  <span className={`status ${st.ws_connected ? "ok" : "warn"}`}>{st.ws_connected ? "CONNECTED" : "OFF"}</span>
+                  <span className={`status ${st.feed_status === "LIVE" ? "ok" : "warn"}`}>{st.feed_status}</span>
+                  <span className="muted">WS {st.ws_age_sec === null || st.ws_age_sec === undefined ? "--" : `${Math.round(st.ws_age_sec)}s`}</span>
+                  <span className="muted">BAR {st.bar_age_sec === null || st.bar_age_sec === undefined ? "--" : `${Math.round(st.bar_age_sec)}s`}</span>
+                  <span className="muted">SRC {st.data_source || "--"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="card">
+          <div className="card-header">
+            <span className="label">TIMELINE</span>
+          </div>
+          <div className="list">
+            {eventTimeline.length === 0 && <div className="muted">No events yet.</div>}
+            {eventTimeline.slice(0, 30).map((ev) => (
+              <div key={ev.id} className="list-item">
+                <span className="muted">{formatTime(ev.ts_utc)}</span>
+                <span className="muted">{ev.event_type}</span>
+                <span className="muted">{ev.data?.symbol || ev.data?.mode || ""}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="card">
+          <div className="card-header">
+            <span className="label">DATA MANAGER</span>
+          </div>
+          <div className="calendar-meta" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
+            <div>
+              <div className="label">BARS LIVE</div>
+              <div className="value">{dataSummary?.bars?.LIVE_WS ?? "--"}</div>
+            </div>
+            <div>
+              <div className="label">BARS IMPORT</div>
+              <div className="value">{dataSummary?.bars?.IMPORT ?? "--"}</div>
+            </div>
+            <div>
+              <div className="label">BARS SIM</div>
+              <div className="value">{dataSummary?.bars?.SIMULATED ?? "--"}</div>
+            </div>
+            <div>
+              <div className="label">BARS ARCH</div>
+              <div className="value">{dataSummary?.bars?.ARCHIVED ?? "--"}</div>
+            </div>
+          </div>
+
+          <div className="config-grid" style={{ marginTop: 10 }}>
+            <label>
+              Symbol
+              <input value={dataFilters.symbol} onChange={(e) => setDataFilters((p) => ({ ...p, symbol: e.target.value }))} />
+            </label>
+            <label>
+              BotId
+              <input value={dataFilters.botId} onChange={(e) => setDataFilters((p) => ({ ...p, botId: e.target.value }))} />
+            </label>
+            <label>
+              Sources
+              <input value={dataFilters.source} onChange={(e) => setDataFilters((p) => ({ ...p, source: e.target.value }))} />
+            </label>
+          </div>
+
+          <div className="list" style={{ marginTop: 10 }}>
+            {dataDays.length === 0 && <div className="muted">No days found (or filtered out).</div>}
+            {dataDays.slice(0, 20).map((d) => (
+              <div key={`${d.day}-${d.botId}-${d.symbol}-${d.source}`} className="list-item">
+                <span className="muted">{d.day}</span>
+                <span className="muted">{d.symbol}</span>
+                <span className="muted">{d.source}</span>
+                <span className="muted">bars {d.bars_count}</span>
+                <span className="muted">trades {d.trades_count}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="signal-hint" style={{ marginTop: 10 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Import Data (CSV/JSON)</div>
+            <div className="config-grid">
+              <label>
+                Symbol
+                <input value={importMeta.symbol} onChange={(e) => setImportMeta((p) => ({ ...p, symbol: e.target.value }))} />
+              </label>
+              <label>
+                Timeframe
+                <input value={importMeta.timeframe} onChange={(e) => setImportMeta((p) => ({ ...p, timeframe: e.target.value }))} />
+              </label>
+              <label>
+                BotId
+                <input value={importMeta.botId} onChange={(e) => setImportMeta((p) => ({ ...p, botId: e.target.value }))} />
+              </label>
+            </div>
+            <input type="file" ref={importFileRef} style={{ marginTop: 8 }} />
+            <button className="pill pill-action" onClick={importData} style={{ marginTop: 8 }}>
+              IMPORT
+            </button>
+            {importResult && (
+              <div className="muted" style={{ marginTop: 6 }}>
+                {JSON.stringify(importResult)}
+              </div>
+            )}
+          </div>
+
+          <div className="signal-hint" style={{ marginTop: 10 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Cleanup (dry-run + confirm token)</div>
+            <div className="config-grid">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={cleanupRules.delete_simulated}
+                  onChange={(e) => setCleanupRules((p) => ({ ...p, delete_simulated: e.target.checked }))}
+                />
+                Delete simulated
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={cleanupRules.archive_simulated}
+                  onChange={(e) => setCleanupRules((p) => ({ ...p, archive_simulated: e.target.checked }))}
+                />
+                Archive simulated
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={cleanupRules.delete_duplicates}
+                  onChange={(e) => setCleanupRules((p) => ({ ...p, delete_duplicates: e.target.checked }))}
+                />
+                Dedupe
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={cleanupRules.drop_outliers}
+                  onChange={(e) => setCleanupRules((p) => ({ ...p, drop_outliers: e.target.checked }))}
+                />
+                Drop outliers (SIM/ARCH)
+              </label>
+            </div>
+            <button className="pill pill-action" onClick={previewCleanup} style={{ marginTop: 8 }}>
+              PREVIEW CLEANUP
+            </button>
+            {cleanupPreview?.plan && (
+              <div className="muted" style={{ marginTop: 6 }}>
+                token: {cleanupPreview.confirm_token}
+                <div>{JSON.stringify(cleanupPreview.plan.tables)}</div>
+              </div>
+            )}
+            {cleanupPreview?.confirm_token && (
+              <>
+                <input
+                  style={{ marginTop: 8 }}
+                  placeholder="Paste confirm token to apply"
+                  value={cleanupConfirm}
+                  onChange={(e) => setCleanupConfirm(e.target.value)}
+                />
+                <button className="pill pill-warn" onClick={applyCleanup} style={{ marginTop: 8 }}>
+                  APPLY CLEANUP
+                </button>
+              </>
+            )}
+          </div>
+        </section>
+
         <section className="card chat-card">
           <div className="card-header">
             <span className="label">WYCKOFF AI ASSISTANT</span>
             <span className="pill pill-mini">BETA</span>
+          </div>
+          <div className="signal-hint">
+            <label style={{ marginRight: 12 }}>
+              <input type="checkbox" checked={opsAssistantEnabled} onChange={(e) => setOpsAssistantEnabled(e.target.checked)} /> Ops mode
+            </label>
+            <label>
+              <input type="checkbox" checked={opsAssistantIncludeWeb} onChange={(e) => setOpsAssistantIncludeWeb(e.target.checked)} /> includeWeb
+            </label>
           </div>
           {chatContext && <div className="chat-context">{chatContext}</div>}
           <div className="chat-body">

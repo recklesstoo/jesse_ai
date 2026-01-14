@@ -9,8 +9,16 @@ from typing import Any, Dict, List, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 
 from backend.compat import bars_store, update_bot_state
-from backend.database import get_db
-from backend.models import AISignal, Bar, MonitorSnapshot, TradeEvent
+from backend.database import SessionLocal
+from backend.models import (
+    AISignal,
+    Bar,
+    MonitorSnapshot,
+    SystemEvent,
+    TradeEvent,
+    DATA_SOURCE_LIVE_WS,
+    DATA_SOURCE_SIMULATED,
+)
 from backend.services.ml_service import ml_service
 from backend.state import (
     AI_MIN_LIVE_BARS,
@@ -31,7 +39,7 @@ MAX_BARS_CACHE = 400
 
 
 def _open_db():
-    return next(get_db())
+    return SessionLocal()
 
 
 def _parse_timestamp(value: Optional[str]) -> datetime:
@@ -56,6 +64,7 @@ def _save_bar_sync(bot_id: str, payload: Dict[str, Any]) -> None:
     db = _open_db()
     try:
         ts = _parse_timestamp(payload.get("timestamp"))
+        now = datetime.now(timezone.utc)
         bar = Bar(
             bot_id=bot_id,
             symbol=payload.get("symbol"),
@@ -67,6 +76,8 @@ def _save_bar_sync(bot_id: str, payload: Dict[str, Any]) -> None:
             close=_safe_float(payload.get("close")),
             volume=_safe_int(payload.get("volume")),
             mode=payload.get("mode", "LIVE"),
+            data_source=DATA_SOURCE_LIVE_WS,
+            ingested_at_utc=now,
         )
         db.add(bar)
         if random.random() < 0.01:
@@ -90,6 +101,7 @@ def _save_bar_sync(bot_id: str, payload: Dict[str, Any]) -> None:
 def _save_signal_sync(bot_id: str, sig_data: Dict[str, Any]) -> None:
     db = _open_db()
     try:
+        now = datetime.now(timezone.utc)
         signal = AISignal(
             bot_id=bot_id,
             symbol=sig_data.get("symbol"),
@@ -98,6 +110,8 @@ def _save_signal_sync(bot_id: str, sig_data: Dict[str, Any]) -> None:
             confidence=sig_data.get("confidence"),
             explain=sig_data.get("explain"),
             bar_ts_utc=_parse_timestamp(sig_data.get("barTs")),
+            data_source=DATA_SOURCE_LIVE_WS,
+            ingested_at_utc=now,
         )
         db.add(signal)
         db.commit()
@@ -110,10 +124,13 @@ def _save_signal_sync(bot_id: str, sig_data: Dict[str, Any]) -> None:
 def _save_monitor_snapshot_sync(bot_id: str, payload: Dict[str, Any]) -> None:
     db = _open_db()
     try:
+        now = datetime.now(timezone.utc)
         snapshot = MonitorSnapshot(
             bot_id=bot_id,
             data=payload,
-            ts_utc=datetime.now(timezone.utc),
+            ts_utc=now,
+            data_source=DATA_SOURCE_LIVE_WS,
+            ingested_at_utc=now,
         )
         db.add(snapshot)
         db.commit()
@@ -126,6 +143,7 @@ def _save_monitor_snapshot_sync(bot_id: str, payload: Dict[str, Any]) -> None:
 def _save_trade_event_sync(bot_id: str, payload: Dict[str, Any]) -> None:
     db = _open_db()
     try:
+        now = datetime.now(timezone.utc)
         trade = TradeEvent(
             bot_id=bot_id,
             symbol=payload.get("symbol"),
@@ -136,6 +154,8 @@ def _save_trade_event_sync(bot_id: str, payload: Dict[str, Any]) -> None:
             market_position=payload.get("marketPosition"),
             reason=payload.get("reason"),
             payload=payload,
+            data_source=DATA_SOURCE_LIVE_WS,
+            ingested_at_utc=now,
         )
         db.add(trade)
         db.commit()
@@ -219,6 +239,7 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
     await websocket.accept()
     async with state_lock:
         _update_bot_connection(bot_id, websocket)
+    asyncio.create_task(asyncio.to_thread(_save_event_sync, bot_id, "BOT_CONNECTED", {"botId": bot_id}))
     await _broadcast_live(
         {
             "type": "bot_status",
@@ -265,6 +286,7 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
     finally:
         async with state_lock:
             _cleanup_bot(bot_id, websocket)
+        asyncio.create_task(asyncio.to_thread(_save_event_sync, bot_id, "BOT_DISCONNECTED", {"botId": bot_id}))
         await _broadcast_live(
             {
                 "type": "bot_status",
@@ -275,6 +297,17 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
 
 async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
     now = datetime.now(timezone.utc)
+    mode_raw = payload.get("mode")
+    if mode_raw is not None and str(mode_raw).strip().upper().startswith("SIM"):
+        asyncio.create_task(
+            asyncio.to_thread(
+                _save_event_sync,
+                bot_id,
+                "REJECTED_SIMULATED_BAR",
+                {"botId": bot_id, "mode": mode_raw},
+            )
+        )
+        return
     ts_raw = payload.get("timestamp")
     ts_dt = _parse_timestamp(str(ts_raw)) if ts_raw else None
     ts_iso = _iso_z(ts_dt) if ts_dt is not None else None
@@ -326,6 +359,14 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
                 pass
 
     asyncio.create_task(asyncio.to_thread(_save_bar_sync, bot_id, payload))
+    asyncio.create_task(
+        asyncio.to_thread(
+            _save_event_sync,
+            bot_id,
+            "BAR_DATA_RX",
+            {"botId": bot_id, "symbol": symbol, "timeframe": timeframe, "mode": payload.get("mode")},
+        )
+    )
     await _broadcast_live(
         {
             "type": "bar_update",
@@ -344,6 +385,17 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
 
 async def _handle_monitor(bot_id: str, payload: Dict[str, Any]) -> None:
     now = datetime.now(timezone.utc)
+    mode_raw = payload.get("mode")
+    if mode_raw is not None and str(mode_raw).strip().upper().startswith("SIM"):
+        asyncio.create_task(
+            asyncio.to_thread(
+                _save_event_sync,
+                bot_id,
+                "REJECTED_SIMULATED_MONITOR",
+                {"botId": bot_id, "mode": mode_raw},
+            )
+        )
+        return
     ts_raw = payload.get("ts") or payload.get("timestamp")
     ts_dt = _parse_timestamp(str(ts_raw)) if ts_raw else None
     ts_iso = _iso_z(ts_dt) if ts_dt is not None else _iso_z(now)
@@ -368,6 +420,14 @@ async def _handle_monitor(bot_id: str, payload: Dict[str, Any]) -> None:
             except Exception:
                 pass
     asyncio.create_task(asyncio.to_thread(_save_monitor_snapshot_sync, bot_id, payload))
+    asyncio.create_task(
+        asyncio.to_thread(
+            _save_event_sync,
+            bot_id,
+            "MONITOR_RX",
+            {"botId": bot_id, "mode": payload.get("mode"), "interval": interval},
+        )
+    )
     await _broadcast_live(
         {
             "type": "bot_status",
@@ -385,6 +445,9 @@ async def _handle_monitor(bot_id: str, payload: Dict[str, Any]) -> None:
 
 async def _handle_trade_event(bot_id: str, payload: Dict[str, Any]) -> None:
     asyncio.create_task(asyncio.to_thread(_save_trade_event_sync, bot_id, payload))
+    asyncio.create_task(
+        asyncio.to_thread(_save_event_sync, bot_id, "TRADE_EVENT_RX", {"botId": bot_id, "payload": payload})
+    )
     async with state_lock:
         _append_log(bot_id, {"id": payload.get("orderId", "<unknown>"), "event": "TRADE_EVENT", "ts": _iso(datetime.now(timezone.utc)), "payload": payload})
     await _broadcast_live({"type": "trade_event", "data": {"botId": bot_id, "payload": payload}})
@@ -430,3 +493,19 @@ def compute_wyckoff_signal(bars: List[Dict[str, Any]]) -> Dict[str, Any]:
         bias = "BEARISH"
     explanation = f"Wyckoff event: {signal_value}"
     return {"signal": signal_value, "bias": bias, "confidence": 0.0, "explain": explanation}
+def _save_event_sync(bot_id: str, event_type: str, data: Dict[str, Any]) -> None:
+    db = _open_db()
+    try:
+        row = SystemEvent(
+            bot_id=bot_id,
+            event_type=event_type,
+            data=data,
+            data_source=DATA_SOURCE_LIVE_WS,
+            ts_utc=datetime.now(timezone.utc),
+        )
+        db.add(row)
+        db.commit()
+    except Exception as exc:
+        print(f"[ws] Event save error: {exc}")
+    finally:
+        db.close()

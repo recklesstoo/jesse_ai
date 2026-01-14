@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Dict, Iterable, List, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -28,3 +29,64 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def _is_sqlite() -> bool:
+    return str(DATABASE_URL).lower().startswith("sqlite:")
+
+
+def _sqlite_table_columns(conn, table: str) -> List[str]:
+    rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+    return [str(r[1]) for r in rows]
+
+
+def _sqlite_add_column(conn, table: str, column_ddl: str) -> None:
+    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column_ddl}"))
+
+
+def ensure_schema() -> None:
+    """
+    Lightweight schema evolution for SQLite (no Alembic in this repo).
+    Adds columns/tables required by new features without destroying data.
+    """
+    if not _is_sqlite():
+        return
+
+    with engine.begin() as conn:
+        # Create new tables if missing (Base.metadata.create_all handles tables, but not columns).
+        # Ensure columns exist for legacy DBs.
+        table_to_columns: Dict[str, Iterable[str]] = {
+            "bars": (
+                "data_source TEXT DEFAULT 'LIVE_WS'",
+                "ingested_at_utc DATETIME DEFAULT CURRENT_TIMESTAMP",
+            ),
+            "ai_signals": (
+                "data_source TEXT DEFAULT 'LIVE_WS'",
+                "ingested_at_utc DATETIME DEFAULT CURRENT_TIMESTAMP",
+            ),
+            "monitor_snapshots": (
+                "data_source TEXT DEFAULT 'LIVE_WS'",
+                "ingested_at_utc DATETIME DEFAULT CURRENT_TIMESTAMP",
+            ),
+            "trade_events": (
+                "data_source TEXT DEFAULT 'LIVE_WS'",
+                "ingested_at_utc DATETIME DEFAULT CURRENT_TIMESTAMP",
+            ),
+            "system_events": (
+                # if table doesn't exist, create_all will create it.
+            ),
+        }
+
+        existing_tables = {
+            str(r[0])
+            for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+        }
+
+        for table, ddl_cols in table_to_columns.items():
+            if table not in existing_tables:
+                continue
+            existing_cols = set(_sqlite_table_columns(conn, table))
+            for ddl in ddl_cols:
+                col_name = ddl.split()[0]
+                if col_name not in existing_cols:
+                    _sqlite_add_column(conn, table, ddl)

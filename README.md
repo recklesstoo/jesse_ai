@@ -40,3 +40,32 @@ The top badges are driven by `GET http://127.0.0.1:8000/api/v1/state?botId=...` 
 - `MON AGE` + `MONITOR`: seconds since the last `MONITOR` was received (`monitor_age_sec`) and `monitor_status` (`NO_MONITOR` / `OK` / `STALE`).
 
 Note: `BAR AGE`/staleness is computed from the server-side receive time (not the payload timestamp) to avoid false STALE during backtests or clock drift.
+
+## Bot Registry / Timeline / Swarm (read-only)
+
+- Bots registry: `GET http://127.0.0.1:8000/api/v1/bots`
+- Timeline: `GET http://127.0.0.1:8000/api/v1/events?limit=200&botId=bot-1`
+- Swarm:
+  - `GET http://127.0.0.1:8000/api/v1/swarm/summary`
+  - `GET http://127.0.0.1:8000/api/v1/swarm/rank?limit=10`
+  - `POST http://127.0.0.1:8000/api/v1/swarm/plan` (recommendations only)
+
+Important: the orchestrator/swarm is **read-only** and does not execute trades.
+
+## AI execution (disabled)
+
+- `POST /api/v1/ai-order` is disabled on purpose (403). The dashboard can show signals, but execution must be manual.
+
+## Data Manager (import + cleanup)
+
+The backend stores bars/trades with a `data_source`:
+`LIVE_WS | IMPORT | SIMULATED | ARCHIVED` and all timestamps are treated as UTC.
+
+- Summary totals: `GET http://127.0.0.1:8000/api/v1/data/summary`
+- Days available: `GET http://127.0.0.1:8000/api/v1/data/days?symbol=MNQ&botId=bot-1&source=LIVE_WS,IMPORT`
+- Import (explicit): `POST http://127.0.0.1:8000/api/v1/data/import` (multipart CSV/JSON)
+- Cleanup (explicit, safe by default):
+  - Preview: `POST http://127.0.0.1:8000/api/v1/data/cleanup/preview` → returns `confirm_token`
+  - Apply: `POST http://127.0.0.1:8000/api/v1/data/cleanup/apply` with `confirm_token`
+
+The UI includes a **Data Manager** card for summary, day listing, import, and cleanup preview/apply.

@@ -7,9 +7,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import init_shadow_db
-from backend.database import Base, engine
+from backend.database import Base, engine, ensure_schema
 from backend.routers.health import router as health_router
 from backend.routers.market import router as market_router
+from backend.routers.ops import router as ops_router
 from backend.ws.server import (
     compute_wyckoff_signal as _compute_wyckoff_signal,
     ws_bot,
@@ -51,10 +52,12 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(market_router)
+app.include_router(ops_router)
 
 @app.on_event("startup")
 async def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    ensure_schema()
     init_shadow_db()
 
 app.websocket("/ws/live")(ws_live)
