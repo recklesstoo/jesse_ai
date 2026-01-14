@@ -83,6 +83,11 @@ The Advanced AI Assistant is a read-only operator. It can summarize health, diag
 
 Logs: `logs/ai_assistant.log` (and `logs/ai_web.log` only if web tools are enabled/configured).
 
+## Fix: UI crash on startup
+
+The dashboard uses a React `ErrorBoundary`. Previously it swallowed the real exception details (state mutation bug), making startup crashes show only “Something went wrong.”.
+The ErrorBoundary now shows the full `message`, `stack`, and `componentStack` in DEV (and provides “Copy diagnostic” in PROD), so the root cause is visible and actionable. Proxying `/api` and `/ws` through Vite on port `3001` is also enforced (`strictPort`) and validated via `npm run doctor:ui`.
+
 ## Data Manager (import + cleanup)
 
 The backend stores bars/trades with a `data_source`:

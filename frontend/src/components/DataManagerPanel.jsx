@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 export default function DataManagerPanel() {
   const [symbol, setSymbol] = useState("MNQ");
@@ -14,16 +14,23 @@ export default function DataManagerPanel() {
   const [purgeSim, setPurgeSim] = useState(false);
   const fileRef = useRef(null);
   const [ingestResult, setIngestResult] = useState(null);
+  const [error, setError] = useState(null);
 
   const loadDays = async () => {
     setLoading(true);
     try {
       const qs = new URLSearchParams({ symbol, timeframe });
       const res = await fetch(`${API_BASE}/api/v1/data/days?${qs.toString()}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        setError(`HTTP ${res.status}`);
+        return;
+      }
       const data = await res.json();
       setDays(data.days || []);
       setCounts(data.counts || null);
+      setError(null);
+    } catch (e) {
+      setError("API DOWN");
     } finally {
       setLoading(false);
     }
@@ -114,7 +121,8 @@ export default function DataManagerPanel() {
       </div>
 
       <div className="list" style={{ marginTop: 10, maxHeight: 200, overflow: "auto" }}>
-        {days.length === 0 && <div className="muted">{loading ? "Loading..." : "No days found."}</div>}
+        {error && <div className="muted">ERROR: {error}</div>}
+        {days.length === 0 && !error && <div className="muted">{loading ? "Loading..." : "No days found."}</div>}
         {days.slice(0, 120).map((d) => (
           <div key={d} className="list-item">
             <span className="muted">{d}</span>
@@ -163,4 +171,3 @@ export default function DataManagerPanel() {
     </section>
   );
 }
-

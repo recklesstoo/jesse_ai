@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "doctor:ui": "node scripts/doctor-ui.mjs",
     "build": "vite build",
     "preview": "vite preview --port 3001"
   },

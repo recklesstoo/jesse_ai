@@ -6,8 +6,12 @@ import ConfusionMatrixHeatmap from "./components/ConfusionMatrixHeatmap";
 import AIAssistantPanel from "./components/AIAssistantPanel";
 import DataManagerPanel from "./components/DataManagerPanel";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
-const WS_BASE = API_BASE.replace(/^http/i, "ws");
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+const WS_BASE =
+  import.meta.env.VITE_WS_BASE ||
+  (API_BASE
+    ? API_BASE.replace(/^http/i, "ws")
+    : (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:3001").replace(/^http/i, "ws"));
 const BOT_ID = import.meta.env.VITE_BOT_ID || "bot-1";
 const PRICE_REFRESH_MS = Number(import.meta.env.VITE_PRICE_REFRESH_MS || 200);
 const EXEC_TOKEN_STORAGE_KEY = "wyckoff_exec_token";
@@ -453,7 +457,13 @@ export default function App() {
   const [executionStatus, setExecutionStatus] = useState(null);
   const [execModeOpen, setExecModeOpen] = useState(false);
   const [execModeDraft, setExecModeDraft] = useState("MANUAL_ONLY");
-  const [execToken, setExecToken] = useState(() => localStorage.getItem(EXEC_TOKEN_STORAGE_KEY) || "");
+  const [execToken, setExecToken] = useState(() => {
+    try {
+      return localStorage.getItem(EXEC_TOKEN_STORAGE_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
 
   const [opsAssistantEnabled, setOpsAssistantEnabled] = useState(false);
   const [opsAssistantIncludeWeb, setOpsAssistantIncludeWeb] = useState(false);
@@ -1283,7 +1293,11 @@ export default function App() {
       });
       const data = await res.json();
       if (data.ok) {
-        localStorage.setItem(EXEC_TOKEN_STORAGE_KEY, execToken || "");
+        try {
+          localStorage.setItem(EXEC_TOKEN_STORAGE_KEY, execToken || "");
+        } catch {
+          // ignore
+        }
         addToast(`Execution mode: ${data.execution_mode}`, "success");
         setExecModeOpen(false);
       } else {

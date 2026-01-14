@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 export default function AIAssistantPanel({ botId }) {
   const [tools, setTools] = useState(false);
@@ -103,4 +103,3 @@ export default function AIAssistantPanel({ botId }) {
     </section>
   );
 }
-
