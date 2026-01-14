@@ -1,5 +1,22 @@
 # jesse_ai
 
+## Estado actual (Tech Lead / SRE)
+
+- Backend: FastAPI `http://127.0.0.1:8000` con WS `ws://127.0.0.1:8000/ws/live` (UI) y `ws://127.0.0.1:8000/ws/{botId}` (BridgePuppet/Ninja).
+- Frontend: Vite/React `http://127.0.0.1:3001` (proxy a `/api` y `/ws` hacia `8000`).
+- Verdad única de estado para un bot (via `GET /api/v1/state?botId=...`):
+  - `transport_connected` / `ws_connected`: BridgePuppet conectado al WS del bot.
+  - `nt_mode`: estado reportado por Ninja (`LIVE`/`BACKTEST`/`UNKNOWN`).
+  - `mode`: modo de plataforma (`LIVE`/`BACKTEST`/`SIM`/`UNKNOWN`) derivado de `state.mode` + `nt_mode`.
+  - `data_source`: `LIVE_WS | CACHED | NONE | UNKNOWN_TS | SIMULATED`.
+  - `feed_status`: `LIVE | STALE | NO_FEED` + `feed_reason` para explicar por qué dice STALE.
+
+## Cómo validar (3 comandos)
+
+1) `.\scripts\doctor.ps1`
+2) `curl http://127.0.0.1:8000/api/v1/health`
+3) `cd frontend; npm run doctor:ui`
+
 ## Environment preparation
 
 1. Copy `.env.example` to `.env`, adjust the database path, port overrides, and secrets as needed.
@@ -51,9 +68,10 @@ The top badges are driven by `GET http://127.0.0.1:8000/api/v1/state?botId=...` 
 
 - `CONNECTED`: the BridgePuppet socket is connected (`ws_connected=true`).
 - `NT MODE`: derived from the latest Ninja `payload.mode` (`LIVE` / `BACKTEST` / `UNKNOWN`).
+- `MODE`: derived from bot state + NT mode (`mode`: `LIVE` / `BACKTEST` / `SIM` / `UNKNOWN`).
 - `WS AGE`: seconds since the last Ninja WS event received (`ws_age_sec`, any message type).
-- `SRC`: `LIVE_WS` when the Ninja socket is connected, otherwise `CACHED` if the UI is showing the last known values, else `NONE`.
-- `BAR AGE` + `FEED`: seconds since the last `BAR_DATA` was received (`bar_age_sec`) and `feed_status` (`NO_FEED` / `LIVE` / `STALE`). **UI "LIVE" only means `SRC=LIVE_WS` + recent bars**.
+- `SRC`: `data_source` (`LIVE_WS | CACHED | NONE | UNKNOWN_TS | SIMULATED`).
+- `BAR AGE` + `FEED`: seconds since the last `BAR_DATA` was received (`bar_age_sec`) and `feed_status` (`NO_FEED` / `LIVE` / `STALE`). Hover tooltip uses `feed_reason`. **UI "LIVE" only means `SRC=LIVE_WS` + recent bars**.
 - `MON AGE` + `MONITOR`: seconds since the last `MONITOR` was received (`monitor_age_sec`) and `monitor_status` (`NO_MONITOR` / `OK` / `STALE`).
 
 Note: `BAR AGE`/staleness is computed from the server-side receive time (not the payload timestamp) to avoid false STALE during backtests or clock drift.
@@ -80,6 +98,9 @@ The Advanced AI Assistant is a read-only operator. It can summarize health, diag
 - Capabilities: `GET http://127.0.0.1:8000/api/v1/ai/capabilities`
 - Context snapshot: `GET http://127.0.0.1:8000/api/v1/ai/context?botId=bot-1`
 - Chat: `POST http://127.0.0.1:8000/api/v1/ai/chat` body `{ "message": "...", "botId": "bot-1", "tools": false }`
+- Ops chat (tools + local-doc RAG): `POST http://127.0.0.1:8000/api/v1/assistant/chat` body `{ "botId":"bot-1", "message":"...", "opsMode": true, "includeWeb": false, "sessionId":"optional" }`
+  - `opsMode=true` enables read-only tool calls to real endpoints (`/state`, `/monitor/status`, `/execution/status`, `/swarm/rank`, `/events`, `/data/summary`).
+  - `includeWeb=true` allows optional web search results (if configured) and they are labeled as WEB sources.
 
 Logs: `logs/ai_assistant.log` (and `logs/ai_web.log` only if web tools are enabled/configured).
 
@@ -98,6 +119,7 @@ The backend stores bars/trades with a `data_source`:
 - V2 Days available (SQLite table `data_bars`): `GET http://127.0.0.1:8000/api/v1/data/days?symbol=MNQ&timeframe=1m`
 - V2 Ingest CSV (explicit): `POST http://127.0.0.1:8000/api/v1/data/ingest` (multipart)
 - V2 Clean (explicit): `POST http://127.0.0.1:8000/api/v1/data/clean` with `{ "dryRun": true, "rules": {...} }`
+- Cleanup (confirmation required): `POST http://127.0.0.1:8000/api/v1/data/cleanup?mode=sim_only|all_invalid` with body `{ "confirm": false, "rules": {"symbol":"MNQ","timeframe":"1m"} }` (set `confirm:true` to apply)
 - Legacy (existing bars tables):
   - Summary totals (optionally per day): `GET http://127.0.0.1:8000/api/v1/data/summary` and `GET http://127.0.0.1:8000/api/v1/data/summary?day=YYYY-MM-DD&symbol=MNQ`
   - Days available (legacy shape): `GET http://127.0.0.1:8000/api/v1/data/days_legacy?symbol=MNQ&botId=bot-1&source=LIVE_WS,IMPORT`
@@ -107,3 +129,10 @@ The backend stores bars/trades with a `data_source`:
     - Apply: `POST http://127.0.0.1:8000/api/v1/data/cleanup/apply` with `confirm_token`
 
 Logs: `logs/data_manager.log`.
+
+## TODOs técnicos (siguiente fase)
+
+- Unificar tests: `pytest` corre `tests/` y `backend/tests/`; algunos tests históricos asumen ACKs simulados (ya deshabilitados).
+- Reducir ruido de estados: separar claramente “UI WS (/ws/live)” vs “BridgePuppet WS (/ws/{botId})” en todos los paneles.
+- Revisar consistencia de `state` keys (`connected` vs `ws_connected`) y documentar contrato estable para UI/BridgePuppet.
+- Auditar tablas `bars`/`trade_events` vs `data_bars` para evitar duplicidad de conceptos (ingesta vs feed en vivo).

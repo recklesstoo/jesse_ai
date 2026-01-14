@@ -283,3 +283,54 @@ def data_clean(payload: Dict[str, Any], db: Session = Depends(get_db)) -> Dict[s
     _log(f"[{_utc_now().isoformat()}] clean applied changed={changed} rules={rules}")
     return {"ok": True, "dryRun": False, "before": before, "plan": plan, "changed": changed, "after": after}
 
+
+@router.post("/api/v1/data/cleanup")
+def data_cleanup(
+    payload: Dict[str, Any],
+    mode: str = Query("all_invalid", description="sim_only | all_invalid"),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Convenience endpoint for UI actions.
+
+    - Always previews unless payload.confirm == true.
+    - Never deletes anything without explicit confirmation.
+    """
+    confirm = bool(payload.get("confirm") is True)
+    rules = payload.get("rules") or {}
+    symbol = (rules.get("symbol") or "").strip().upper() or None
+    timeframe = (rules.get("timeframe") or "").strip() or None
+    mode = (mode or "").strip().lower() or "all_invalid"
+
+    if mode not in ("sim_only", "all_invalid"):
+        return {"ok": False, "error": "invalid_mode", "mode": mode}
+
+    if mode == "sim_only":
+        filters = []
+        if symbol:
+            filters.append(DataBar.symbol == symbol)
+        if timeframe:
+            filters.append(DataBar.timeframe == timeframe)
+        base = db.query(DataBar).filter(and_(*filters)) if filters else db.query(DataBar)
+        before = {"total": int(base.count()), "simulated": int(base.filter(DataBar.is_simulated.is_(True)).count())}
+        plan = {"mode": "sim_only", "simulated": before["simulated"]}
+        if not confirm:
+            _log(f"[{_utc_now().isoformat()}] cleanup preview mode=sim_only plan={plan} rules={rules}")
+            return {"ok": True, "dryRun": True, "confirm_required": True, "before": before, "plan": plan}
+        deleted = int(base.filter(DataBar.is_simulated.is_(True)).delete(synchronize_session=False) or 0)
+        db.commit()
+        after_q = db.query(DataBar).filter(and_(*filters)) if filters else db.query(DataBar)
+        after = {"total": int(after_q.count()), "simulated": int(after_q.filter(DataBar.is_simulated.is_(True)).count())}
+        changed = {"simulated_deleted": deleted}
+        _log(f"[{_utc_now().isoformat()}] cleanup apply mode=sim_only changed={changed} rules={rules}")
+        return {"ok": True, "dryRun": False, "before": before, "plan": plan, "changed": changed, "after": after}
+
+    # all_invalid: reuse /data/clean with explicit confirm gate.
+    dry_run = not confirm
+    # default: do not purge simulated unless explicitly requested
+    rules.setdefault("purge_simulated", bool(rules.get("purge_simulated", False)))
+    clean_payload = {"dryRun": dry_run, "rules": rules}
+    res = data_clean(clean_payload, db=db)
+    res["confirm_required"] = True
+    res["mode"] = "all_invalid"
+    return res

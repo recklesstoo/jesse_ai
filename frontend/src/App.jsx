@@ -536,7 +536,7 @@ export default function App() {
     () => [
       {
         key: "ws",
-        label: "WebSocket",
+        label: "UI WS (/ws/live)",
         value: errors.ws || (connected ? "OK" : "DISCONNECTED")
       },
       {
@@ -1202,11 +1202,13 @@ export default function App() {
   }, [feedState?.monitor_age_sec]);
   const bridgeConnected = Boolean(feedState?.ws_connected);
   const ntMode = (feedState?.nt_mode || "UNKNOWN").toUpperCase();
+  const backendMode = (feedState?.mode || "UNKNOWN").toUpperCase();
   const platformMode = useMemo(() => {
+    if (backendMode && backendMode !== "UNKNOWN") return backendMode;
     if (feedOk) return "LIVE";
     if (ntMode === "BACKTEST") return "BACKTEST";
     return "UNKNOWN";
-  }, [feedOk, ntMode]);
+  }, [backendMode, feedOk, ntMode]);
   const wsStaleSec = useMemo(() => {
     const value = feedState?.ws_stale_sec;
     if (value === null || value === undefined) return 2;
@@ -1439,7 +1441,16 @@ export default function App() {
           <span className={`pill ${bridgeConnected ? "pill-ok" : "pill-warn"}`}>
             {bridgeConnected ? "CONNECTED" : "DISCONNECTED"}
           </span>
-          <span className={`pill ${dataSource === "LIVE_WS" ? "pill-ok" : dataSource === "CACHED" ? "pill-warn" : ""}`}>
+          <span
+            className={`pill ${
+              dataSource === "LIVE_WS"
+                ? "pill-ok"
+                : dataSource === "CACHED" || dataSource === "UNKNOWN_TS" || dataSource === "SIMULATED"
+                  ? "pill-warn"
+                  : ""
+            }`}
+            title={feedState?.data_source_kind ? `source=${feedState.data_source_kind}` : ""}
+          >
             {dataSource === "CACHED" ? "DATA CACHED" : `SRC ${dataSource}`}
           </span>
           <span className={`pill ${healthOk ? "pill-ok" : "pill-warn"}`}>
@@ -1466,7 +1477,7 @@ export default function App() {
           <span className={`pill ${feedOk ? "pill-ok" : "pill-warn"}`}>
             BAR AGE {feedAgeSec === null ? "--" : `${feedAgeSec}s`}
           </span>
-          <span className={`pill ${feedOk ? "pill-ok" : "pill-warn"}`}>
+          <span className={`pill ${feedOk ? "pill-ok" : "pill-warn"}`} title={feedState?.feed_reason || ""}>
             FEED {feedOk ? "OK" : feedState.feed_status === "NO_FEED" ? "NO FEED" : "STALE"}
           </span>
           <span className={`pill ${monitorOk ? "pill-ok" : "pill-warn"}`}>

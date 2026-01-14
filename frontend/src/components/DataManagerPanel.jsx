@@ -79,11 +79,18 @@ export default function DataManagerPanel({ items, disableFetch = false }) {
   const [days, setDays] = useState([]);
   const [counts, setCounts] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState(null);
+  const [summaryRows, setSummaryRows] = useState([]);
   const [cleanLoading, setCleanLoading] = useState(false);
   const [cleanPreview, setCleanPreview] = useState(null);
   const [cleanApply, setCleanApply] = useState(null);
   const [purgeSim, setPurgeSim] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState(null);
+  const [cleanupApply, setCleanupApply] = useState(null);
+  const [cleanupConfirm, setCleanupConfirm] = useState(false);
   const fileRef = useRef(null);
+  const [ingestPath, setIngestPath] = useState("");
   const [ingestResult, setIngestResult] = useState(null);
   const [error, setError] = useState(null);
   const [warning, setWarning] = useState(null);
@@ -122,8 +129,37 @@ export default function DataManagerPanel({ items, disableFetch = false }) {
     }
   };
 
+  const loadSummary = async () => {
+    if (disableFetch) return;
+    setSummaryLoading(true);
+    try {
+      const qs = new URLSearchParams({ symbol, timeframe, includeDays: "true" });
+      const res = await fetch(`${API_BASE}/api/v1/data/summary?${qs.toString()}`);
+      if (!res.ok) {
+        setSummaryError(`HTTP ${res.status}`);
+        setSummaryRows([]);
+        return;
+      }
+      const data = await res.json();
+      if (import.meta?.env?.DEV) {
+        console.debug("[DataManagerPanel] /api/v1/data/summary response", data);
+      }
+      const normalized = normalizeDayRows(data, symbol, timeframe);
+      setSummaryRows(normalized.rows);
+      setSummaryError(null);
+    } catch (e) {
+      setSummaryError("API DOWN");
+      setSummaryRows([]);
+    } finally {
+      setSummaryLoading(false);
+    }
+  };
+
   useEffect(() => {
-    if (!items) loadDays();
+    if (!items) {
+      loadDays();
+      loadSummary();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, timeframe, items, disableFetch]);
 
@@ -180,6 +216,55 @@ export default function DataManagerPanel({ items, disableFetch = false }) {
     const data = await res.json();
     setIngestResult(data);
     await loadDays();
+  };
+
+  const ingestFromPath = async () => {
+    const path = (ingestPath || "").trim();
+    if (!path) return;
+    setIngestResult(null);
+    const fd = new FormData();
+    fd.append("symbol", symbol);
+    fd.append("timeframe", timeframe);
+    fd.append("source", "CSV_INGEST");
+    fd.append("is_simulated", "false");
+    fd.append("path", path);
+    const res = await fetch(`${API_BASE}/api/v1/data/ingest`, { method: "POST", body: fd });
+    const data = await res.json();
+    setIngestResult(data);
+    await loadDays();
+  };
+
+  const previewSimCleanup = async () => {
+    setCleanLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/data/cleanup?mode=sim_only`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: false, rules: { symbol, timeframe } })
+      });
+      const data = await res.json();
+      setCleanupPreview(data);
+      setCleanupApply(null);
+    } finally {
+      setCleanLoading(false);
+    }
+  };
+
+  const applySimCleanup = async () => {
+    if (!cleanupConfirm) return;
+    setCleanLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/data/cleanup?mode=sim_only`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true, rules: { symbol, timeframe } })
+      });
+      const data = await res.json();
+      setCleanupApply(data);
+      await loadDays();
+    } finally {
+      setCleanLoading(false);
+    }
   };
 
   const stats = useMemo(() => {
@@ -247,14 +332,79 @@ export default function DataManagerPanel({ items, disableFetch = false }) {
       </div>
 
       <div className="signal-hint" style={{ marginTop: 10 }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Available days in DB (bars/trades)</div>
+        {summaryError && <div className="muted">ERROR: {summaryError}</div>}
+        {!summaryError && summaryRows.length === 0 && (
+          <div className="muted">{summaryLoading ? "Loading..." : "No days found."}</div>
+        )}
+        {summaryRows.length > 0 && (
+          <div className="list" style={{ maxHeight: 160, overflow: "auto" }}>
+            <div className="list-item" style={{ fontWeight: 700 }}>
+              <span className="muted" style={{ width: 110 }}>Day</span>
+              <span className="muted" style={{ width: 70 }}>Symbol</span>
+              <span className="muted" style={{ width: 90 }}>Bot</span>
+              <span className="muted" style={{ width: 70 }}>Bars</span>
+              <span className="muted" style={{ width: 70 }}>Trades</span>
+              <span className="muted" style={{ width: 170 }}>First</span>
+              <span className="muted" style={{ width: 170 }}>Last</span>
+            </div>
+            {summaryRows.slice(0, 80).map((row, idx) => (
+              <div key={`sum-${row.day || "day"}-${row.symbol || "sym"}-${row.botId || "bot"}-${idx}`} className="list-item">
+                <span className="muted" style={{ width: 110 }}>{safeText(row.day) || "--"}</span>
+                <span className="muted" style={{ width: 70 }}>{safeText(row.symbol) || "--"}</span>
+                <span className="muted" style={{ width: 90 }}>{safeText(row.botId) || "--"}</span>
+                <span className="muted" style={{ width: 70 }}>{typeof row.bars === "number" ? row.bars : "--"}</span>
+                <span className="muted" style={{ width: 70 }}>{typeof row.trades === "number" ? row.trades : "--"}</span>
+                <span className="muted" style={{ width: 170 }}>{safeText(row.first_ts_utc) || "--"}</span>
+                <span className="muted" style={{ width: 170 }}>{safeText(row.last_ts_utc) || "--"}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="signal-hint" style={{ marginTop: 10 }}>
         <div style={{ fontWeight: 700, marginBottom: 6 }}>Ingest CSV</div>
         <input type="file" ref={fileRef} />
         <button className="pill pill-action" onClick={ingestCsv} style={{ marginTop: 8 }}>
           INGEST
         </button>
+        <div className="muted" style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Ingest from local path (optional)</div>
+          <input value={ingestPath} onChange={(e) => setIngestPath(e.target.value)} placeholder="data\\file.csv (requires WYCKOFF_ALLOW_LOCAL_INGEST_PATH)" />
+          <button className="pill" onClick={ingestFromPath} style={{ marginTop: 8 }}>
+            INGEST PATH
+          </button>
+        </div>
         {ingestResult && (
           <div className="muted" style={{ marginTop: 6 }}>
             {JSON.stringify(ingestResult)}
+          </div>
+        )}
+      </div>
+
+      <div className="signal-hint" style={{ marginTop: 10 }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Clean simulation data (confirmation required)</div>
+        <label className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={cleanupConfirm} onChange={(e) => setCleanupConfirm(e.target.checked)} />
+          I understand this will delete simulated rows
+        </label>
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <button className="pill pill-action" onClick={previewSimCleanup} disabled={cleanLoading}>
+            PREVIEW
+          </button>
+          <button className="pill pill-warn" onClick={applySimCleanup} disabled={cleanLoading || !cleanupConfirm}>
+            APPLY
+          </button>
+        </div>
+        {cleanupPreview && (
+          <div className="muted" style={{ marginTop: 6 }}>
+            preview: {JSON.stringify(cleanupPreview.plan || cleanupPreview)}
+          </div>
+        )}
+        {cleanupApply && (
+          <div className="muted" style={{ marginTop: 6 }}>
+            applied: {JSON.stringify(cleanupApply.changed || cleanupApply)}
           </div>
         )}
       </div>

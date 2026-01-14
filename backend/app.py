@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import init_shadow_db
-from backend.database import Base, engine, ensure_schema
+from backend.database import Base, engine, ensure_schema, PROJECT_ROOT
 from backend.routers.health import router as health_router
 from backend.routers.execution import router as execution_router
 from backend.routers.ai import router as ai_router

@@ -65,7 +65,9 @@ def test_command_ack_property(status):
         log_res = client.get(f"/api/v1/commands/{bot_id}/log?limit=50")
         assert log_res.status_code == 200
         events = [row["event"] for row in log_res.json()["log"]]
-        assert f"ACK_{status}" in events
+        # SIM acks are coerced to REJECTED (simulated acks disabled).
+        expected = "ACK_REJECTED" if str(status).upper().startswith("SIM") else f"ACK_{status}"
+        assert expected in events
     finally:
         app_module._queues.pop(bot_id, None)
         app_module.cmd_log.pop(bot_id, None)

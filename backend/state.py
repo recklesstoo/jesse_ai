@@ -206,16 +206,31 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     last_bar_payload_dt = _parse_dt(state.get("last_bar_payload_ts_utc"))
     last_bar_payload_iso = last_bar_payload_dt.isoformat().replace("+00:00", "Z") if last_bar_payload_dt is not None else None
 
-    if ws_connected:
+    explicit_source = state.get("data_source")
+    explicit_source_norm = str(explicit_source).strip().upper() if explicit_source is not None else ""
+
+    # Prefer explicit data_source markers written by WS handlers (e.g., UNKNOWN_TS),
+    # otherwise derive from connection/cached state.
+    if explicit_source_norm in {"UNKNOWN_TS", "SIMULATED"}:
+        data_source = explicit_source_norm
+    elif ws_connected:
         data_source = "LIVE_WS"
     elif state.get("last_price") is not None or last_bar_rx_dt is not None:
         data_source = "CACHED"
     else:
         data_source = "NONE"
 
+    data_source_kind = "NONE"
+    if data_source == "LIVE_WS":
+        data_source_kind = "NINJA_REAL"
+    elif data_source in {"SIMULATED", "UNKNOWN_TS", "CACHED"}:
+        data_source_kind = data_source
+
     # "LIVE" in UI only means recent LIVE_WS bars; cached data can never be "LIVE".
     if last_bar_rx_dt is None:
         feed_status = "NO_FEED"
+    elif data_source == "UNKNOWN_TS":
+        feed_status = "STALE"
     elif data_source == "LIVE_WS" and bar_age_sec is not None and bar_age_sec <= feed_stale_sec:
         feed_status = "LIVE"
     else:
@@ -228,10 +243,36 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     else:
         monitor_status = "STALE"
 
+    # Canonical high-level mode (platform state), distinct from feed freshness.
+    raw_mode = state.get("mode") or state.get("last_mode") or ""
+    raw_mode_u = str(raw_mode).strip().upper()
+    if raw_mode_u.startswith("SIM"):
+        mode = "SIM"
+    elif nt_mode == "BACKTEST":
+        mode = "BACKTEST"
+    elif nt_mode == "LIVE":
+        mode = "LIVE"
+    else:
+        mode = "UNKNOWN"
+
+    # Explain "STALE" concisely for UI tooltips.
+    feed_reason = "ok"
+    if last_bar_rx_dt is None:
+        feed_reason = "no BAR_DATA received"
+    elif data_source == "UNKNOWN_TS":
+        feed_reason = "BAR_DATA missing/invalid timestamp (UNKNOWN_TS)"
+    elif data_source != "LIVE_WS":
+        feed_reason = f"data_source={data_source}"
+    elif bar_age_sec is not None and bar_age_sec > feed_stale_sec:
+        feed_reason = f"bar_age_sec>{round(feed_stale_sec, 3)}"
+    elif ws_age_sec is not None and ws_age_sec > ws_stale_sec:
+        feed_reason = f"ws_age_sec>{round(ws_stale_sec, 3)}"
+
     return {
         "bot_id": bot_id,
         "feed_status": feed_status,
         "ws_connected": ws_connected,
+        "transport_connected": ws_connected,
         "ws_age_sec": ws_age_sec,
         "ws_stale_sec": ws_stale_sec,
         "monitor_status": monitor_status,
@@ -239,8 +280,11 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
         "monitor_age_sec": monitor_age_sec,
         "feed_stale_sec": feed_stale_sec,
         "monitor_stale_sec": monitor_stale_sec,
+        "mode": mode,
         "nt_mode": nt_mode,
         "data_source": data_source,
+        "data_source_kind": data_source_kind,
+        "feed_reason": feed_reason,
         "last_mode": state.get("last_mode"),
         "last_bar_ts_utc": last_bar_payload_iso,
         "last_bar_rx_utc": _iso(last_bar_rx_dt),

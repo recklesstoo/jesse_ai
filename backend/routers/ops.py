@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
 
-from backend.database import SessionLocal, get_db
+from backend.database import PROJECT_ROOT, SessionLocal, get_db
 from backend.models import (
     AISignal,
     Bar,
@@ -25,6 +25,7 @@ from backend.models import (
     DATA_SOURCE_SIMULATED,
 )
 from backend.state import _get_bot_state, compute_feed_status, state_lock
+from backend.assistant.service import get_assistant_service
 
 router = APIRouter()
 
@@ -177,14 +178,27 @@ async def swarm_plan(payload: Dict[str, Any]) -> Dict[str, Any]:
 @router.post("/api/v1/assistant/chat")
 async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db)) -> Dict[str, Any]:
     """
-    Ops assistant (read-only). Uses registry/timeline/swarm and never sends orders.
+    Conversational ops assistant (read-only). Uses tools + local-doc RAG and never sends orders.
     """
     bot_id = payload.get("botId") or "bot-1"
-    message = (payload.get("message") or "").strip().lower()
+    message = (payload.get("message") or "").strip()
     include_web = bool(payload.get("includeWeb") or False)
     if include_web:
         # Placeholder: web is intentionally off by default and not implemented.
         pass
+
+    # New assistant pipeline (keep legacy fallback code below for safety).
+    ops_mode = bool(payload.get("opsMode") if "opsMode" in payload else True)
+    session_id = payload.get("sessionId")
+    assistant = get_assistant_service(PROJECT_ROOT)
+    if not assistant.doc_index.built:
+        try:
+            assistant.build_index()
+        except Exception:
+            pass
+    res = assistant.chat(bot_id=bot_id, message=message, ops_mode=ops_mode, include_web=include_web, session_id=session_id)
+    res.setdefault("ok", True)
+    return res
 
     computed = compute_feed_status(bot_id)
     state = _get_bot_state(bot_id)
@@ -205,7 +219,9 @@ async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db))
 def data_summary(
     day: Optional[str] = Query(None, description="UTC day (YYYY-MM-DD). When set, returns per-day counts."),
     symbol: Optional[str] = Query(None),
+    timeframe: Optional[str] = Query(None),
     botId: Optional[str] = Query(None, alias="botId"),
+    includeDays: bool = Query(False, alias="includeDays", description="When true, returns per-day items list."),
     source: str = Query("LIVE_WS,IMPORT", description="Comma separated: LIVE_WS,IMPORT,CACHED,SIMULATED,ARCHIVED,ALL"),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -219,6 +235,8 @@ def data_summary(
             filters.append(model.bot_id == botId)
         if symbol:
             filters.append(model.symbol == symbol)
+        if timeframe and hasattr(model, "timeframe"):
+            filters.append(getattr(model, "timeframe") == timeframe)
         if sources:
             filters.append(model.data_source.in_(sources))
         if day:
@@ -250,12 +268,119 @@ def data_summary(
         "SIMULATED": _count(TradeEvent, DATA_SOURCE_SIMULATED),
         "ARCHIVED": _count(TradeEvent, DATA_SOURCE_ARCHIVED),
     }
+
+    bars_real = int(bars.get("LIVE_WS") or 0) + int(bars.get("IMPORT") or 0)
+    trades_real = int(trades.get("LIVE_WS") or 0) + int(trades.get("IMPORT") or 0)
+    bars_sim = int(bars.get("SIMULATED") or 0)
+    trades_sim = int(trades.get("SIMULATED") or 0)
+
+    # Always expose available days (UTC) for quick UI/assistant summaries.
+    available_days: List[str] = []
+    try:
+        bar_days = (
+            db.query(Bar.day_utc)
+            .filter(and_(*_filters(Bar)))
+            .distinct()
+            .order_by(Bar.day_utc.desc())
+            .limit(400)
+            .all()
+        )
+        trade_days = (
+            db.query(TradeEvent.day_utc)
+            .filter(and_(*_filters(TradeEvent)))
+            .distinct()
+            .order_by(TradeEvent.day_utc.desc())
+            .limit(400)
+            .all()
+        )
+        s = {str(r[0]) for r in (bar_days or []) if r and r[0]}
+        s.update({str(r[0]) for r in (trade_days or []) if r and r[0]})
+        available_days = sorted(s, reverse=True)
+    except Exception:
+        available_days = []
+
+    items: Optional[List[Dict[str, Any]]] = None
+    if includeDays:
+        items_map: Dict[Tuple[str, str, str, Optional[str]], Dict[str, Any]] = {}
+        # Bars per day.
+        bar_rows = (
+            db.query(
+                Bar.day_utc.label("day"),
+                Bar.symbol.label("symbol"),
+                Bar.bot_id.label("bot_id"),
+                Bar.timeframe.label("timeframe"),
+                func.count(Bar.id).label("bars"),
+                func.min(Bar.ts_utc).label("first_ts"),
+                func.max(Bar.ts_utc).label("last_ts"),
+            )
+            .filter(and_(*_filters(Bar)))
+            .group_by(Bar.day_utc, Bar.symbol, Bar.bot_id, Bar.timeframe)
+            .order_by(Bar.day_utc.desc())
+            .limit(500)
+            .all()
+        )
+        for r in bar_rows:
+            key = (str(r.day), str(r.symbol), str(r.bot_id), str(r.timeframe) if r.timeframe else None)
+            items_map[key] = {
+                "day": str(r.day),
+                "symbol": str(r.symbol),
+                "botId": str(r.bot_id),
+                "timeframe": str(r.timeframe) if r.timeframe else None,
+                "bars": int(r.bars or 0),
+                "trades": 0,
+                "first_ts_utc": _to_z(r.first_ts),
+                "last_ts_utc": _to_z(r.last_ts),
+            }
+
+        # Trades per day (no timeframe; merge to (day,symbol,botId,timeframe=None)).
+        trade_rows = (
+            db.query(
+                TradeEvent.day_utc.label("day"),
+                TradeEvent.symbol.label("symbol"),
+                TradeEvent.bot_id.label("bot_id"),
+                func.count(TradeEvent.id).label("trades"),
+                func.min(TradeEvent.ts_utc).label("first_ts"),
+                func.max(TradeEvent.ts_utc).label("last_ts"),
+            )
+            .filter(and_(*_filters(TradeEvent)))
+            .group_by(TradeEvent.day_utc, TradeEvent.symbol, TradeEvent.bot_id)
+            .order_by(TradeEvent.day_utc.desc())
+            .limit(500)
+            .all()
+        )
+        for r in trade_rows:
+            key = (str(r.day), str(r.symbol), str(r.bot_id), None)
+            row = items_map.get(key) or {
+                "day": str(r.day),
+                "symbol": str(r.symbol),
+                "botId": str(r.bot_id),
+                "timeframe": None,
+                "bars": 0,
+                "trades": 0,
+                "first_ts_utc": None,
+                "last_ts_utc": None,
+            }
+            row["trades"] = int(r.trades or 0)
+            # Prefer bars range if present, but fill if missing.
+            row["first_ts_utc"] = row.get("first_ts_utc") or _to_z(r.first_ts)
+            row["last_ts_utc"] = row.get("last_ts_utc") or _to_z(r.last_ts)
+            items_map[key] = row
+
+        items = list(items_map.values())
+        items.sort(key=lambda x: (x.get("day") or ""), reverse=True)
+
     return {
         "ok": True,
         "day": day,
-        "filters": {"botId": botId, "symbol": symbol, "source": source},
+        "filters": {"botId": botId, "symbol": symbol, "timeframe": timeframe, "source": source},
         "bars": bars,
         "trades": trades,
+        "breakdown": {
+            "REAL": {"bars": bars_real, "trades": trades_real, "sources": ["LIVE_WS", "IMPORT"]},
+            "SIMULATED": {"bars": bars_sim, "trades": trades_sim, "sources": ["SIMULATED"]},
+        },
+        "available_days": available_days,
+        "items": items,
         "ts_utc": _utc_now().isoformat().replace("+00:00", "Z"),
     }
 
