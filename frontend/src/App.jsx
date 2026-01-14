@@ -471,6 +471,7 @@ export default function App() {
   const [botsRegistry, setBotsRegistry] = useState(null);
   const [eventTimeline, setEventTimeline] = useState([]);
   const [swarmRank, setSwarmRank] = useState([]);
+  const [swarmDiag, setSwarmDiag] = useState(null);
   const [swarmPlan, setSwarmPlan] = useState([]);
 
   const [dataSummary, setDataSummary] = useState(null);
@@ -824,6 +825,22 @@ export default function App() {
     };
     pollSwarm();
     const timer = setInterval(pollSwarm, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const pollSwarmDiag = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/swarm/diagnose?limit=10`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setSwarmDiag(data);
+      } catch {
+        // ignore
+      }
+    };
+    pollSwarmDiag();
+    const timer = setInterval(pollSwarmDiag, 8000);
     return () => clearInterval(timer);
   }, []);
 
@@ -1867,6 +1884,7 @@ export default function App() {
             <span className="label">SWARM CONTROL (READ-ONLY)</span>
             <button className="pill pill-action" onClick={generateSwarmPlan}>PLAN</button>
           </div>
+          {swarmDiag?.summary && <div className="muted" style={{ marginBottom: 8 }}>{swarmDiag.summary}</div>}
           <div className="list">
             {swarmRank.length === 0 && <div className="muted">No swarm data yet.</div>}
             {swarmRank.slice(0, 10).map((row) => (

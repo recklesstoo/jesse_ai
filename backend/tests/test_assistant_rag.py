@@ -36,3 +36,14 @@ def test_assistant_chat_calls_tools() -> None:
     tool_results = data.get("tool_results") or []
     assert any(tc.get("name") == "tool_get_status" for tc in tool_calls)
     assert any(tr.get("name") == "tool_get_status" for tr in tool_results)
+
+
+def test_assistant_include_web_off_never_calls_web() -> None:
+    client = TestClient(app)
+    r = client.post(
+        "/api/v1/assistant/chat",
+        json={"botId": "bot-1", "message": "web search ninjatrader ws", "opsMode": True, "includeWeb": False, "sessionId": "pytest"},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert not any(tc.get("name") == "tool_web_search" for tc in (data.get("tool_calls") or []))

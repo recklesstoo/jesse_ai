@@ -102,6 +102,13 @@ The Advanced AI Assistant is a read-only operator. It can summarize health, diag
   - `opsMode=true` enables read-only tool calls to real endpoints (`/state`, `/monitor/status`, `/execution/status`, `/swarm/rank`, `/events`, `/data/summary`).
   - `includeWeb=true` allows optional web search results (if configured) and they are labeled as WEB sources.
 
+### Wyckoff Doctor Trader (persona)
+
+`POST /api/v1/assistant/chat` habla como “doctor en finanzas” con mentalidad agresiva y realista de trader:
+- Reporta estado operativo real (`nt_mode`, `mode`, `feed_status`, `data_source`, `ws_age_sec`, `bar_age_sec`) y explica STALE con `feed_reason`.
+- Nunca ejecuta órdenes: si pides ejecución, devuelve plan (setup, riesgo, invalidación) y pasos manuales.
+- Memoria por sesión: guarda últimos turnos + resumen en `logs/doctor_sessions/` y audita en `logs/doctor_assistant_sessions.jsonl`.
+
 Logs: `logs/ai_assistant.log` (and `logs/ai_web.log` only if web tools are enabled/configured).
 
 ## Fix: UI crash on startup

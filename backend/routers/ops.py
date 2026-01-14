@@ -155,6 +155,51 @@ async def swarm_rank(limit: int = Query(10, ge=1, le=100)) -> Dict[str, Any]:
     return {"ok": True, "rank": ranked[:limit], "count": len(ranked)}
 
 
+@router.get("/api/v1/swarm/diagnose")
+async def swarm_diagnose(limit: int = Query(10, ge=1, le=50)) -> Dict[str, Any]:
+    """
+    Read-only swarm diagnostic: ranks bots and explains readiness blockers (no execution).
+    """
+    rank = await swarm_rank(limit=limit)
+    items = []
+    for entry in rank.get("rank", [])[:limit]:
+        bot_id = entry.get("botId")
+        computed = compute_feed_status(bot_id)
+        reasons: List[str] = []
+        if not computed.get("ws_connected"):
+            reasons.append("ws disconnected")
+        if computed.get("data_source") != "LIVE_WS":
+            reasons.append(f"src={computed.get('data_source')}")
+        if computed.get("feed_status") != "LIVE":
+            reasons.append(f"feed={computed.get('feed_status')} ({computed.get('feed_reason')})")
+        if computed.get("nt_mode") == "BACKTEST":
+            reasons.append("nt_mode=BACKTEST")
+        ready = bool(computed.get("ws_connected") and computed.get("data_source") == "LIVE_WS" and computed.get("feed_status") == "LIVE")
+        items.append(
+            {
+                "botId": bot_id,
+                "score": entry.get("score"),
+                "ready": ready,
+                "why_not_ready": reasons,
+                "mode": computed.get("mode"),
+                "nt_mode": computed.get("nt_mode"),
+                "data_source": computed.get("data_source"),
+                "feed_status": computed.get("feed_status"),
+            }
+        )
+
+    summary = []
+    ready_bots = [i for i in items if i.get("ready")]
+    stale_bots = [i for i in items if not i.get("ready")]
+    summary.append(f"ready={len(ready_bots)} / total={len(items)}")
+    if ready_bots:
+        summary.append("top_ready=" + ", ".join([f"{b['botId']}({b.get('score')})" for b in ready_bots[:5]]))
+    if stale_bots:
+        summary.append("blocked=" + ", ".join([f"{b['botId']}[{';'.join(b.get('why_not_ready') or [])}]" for b in stale_bots[:3]]))
+
+    return {"ok": True, "items": items, "summary": " | ".join(summary)}
+
+
 @router.post("/api/v1/swarm/plan")
 async def swarm_plan(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
