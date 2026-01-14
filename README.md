@@ -88,6 +88,8 @@ Logs: `logs/ai_assistant.log` (and `logs/ai_web.log` only if web tools are enabl
 The dashboard uses a React `ErrorBoundary`. Previously it swallowed the real exception details (state mutation bug), making startup crashes show only “Something went wrong.”.
 The ErrorBoundary now shows the full `message`, `stack`, and `componentStack` in DEV (and provides “Copy diagnostic” in PROD), so the root cause is visible and actionable. Proxying `/api` and `/ws` through Vite on port `3001` is also enforced (`strictPort`) and validated via `npm run doctor:ui`.
 
+Additionally, `DataManagerPanel` could crash on load with `Objects are not valid as a React child` when the API returned day summaries as objects (e.g. `{day, symbol, botId, bars, ...}`) but the UI tried to render them directly. The panel now normalizes multiple response shapes (`[]`, `{days:[]}`, `{items:[]}`) and renders explicit fields in a table-like view; in DEV it shows an “Unexpected data shape” warning with the raw JSON (inside `<pre>`) instead of throwing. A small SSR smoke test (`npm run test:ui`) ensures it renders without exceptions.
+
 ## Data Manager (import + cleanup)
 
 The backend stores bars/trades with a `data_source`:
