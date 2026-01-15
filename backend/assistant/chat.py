@@ -19,6 +19,8 @@ from backend.assistant.tools import (
     tool_get_state,
     tool_swarm_rank,
 )
+from backend.database import SessionLocal
+from backend.models import AssistantSession
 
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
 SESSIONS_DIR = LOG_DIR / "assistant_sessions_openai"
@@ -39,28 +41,81 @@ def _safe_json(obj: Any, *, max_len: int = 120_000) -> str:
     return s
 
 
-def _load_session(session_id: str) -> List[Dict[str, str]]:
+def _sanitize_turns(turns: Any) -> List[Dict[str, str]]:
+    if not isinstance(turns, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for t in turns:
+        if not isinstance(t, dict):
+            continue
+        role = str(t.get("role") or "").strip()
+        content = str(t.get("content") or "").strip()
+        if role and content:
+            out.append({"role": role, "content": content})
+    return out
+
+
+def _load_session_db(session_id: str) -> List[Dict[str, str]]:
+    db = SessionLocal()
+    try:
+        row = db.query(AssistantSession).filter(AssistantSession.session_id == session_id).first()
+        if not row:
+            return []
+        return _sanitize_turns(row.turns)
+    except Exception:
+        return []
+    finally:
+        db.close()
+
+
+def _save_session_db(session_id: str, bot_id: str, turns: List[Dict[str, str]]) -> None:
+    db = SessionLocal()
+    try:
+        row = db.query(AssistantSession).filter(AssistantSession.session_id == session_id).first()
+        if row is None:
+            row = AssistantSession(session_id=session_id, bot_id=bot_id, provider="openai", turns=turns[-30:])
+            db.add(row)
+        else:
+            row.bot_id = bot_id
+            row.turns = turns[-30:]
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _load_session_file(session_id: str) -> List[Dict[str, str]]:
     try:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         p = (SESSIONS_DIR / f"{session_id}.json").resolve()
         if not p.exists():
             return []
         data = json.loads(p.read_text(encoding="utf-8"))
-        turns = data.get("turns") or []
-        if isinstance(turns, list):
-            return [t for t in turns if isinstance(t, dict) and t.get("role") and t.get("content")]
-        return []
+        return _sanitize_turns((data or {}).get("turns"))
     except Exception:
         return []
 
 
-def _save_session(session_id: str, turns: List[Dict[str, str]]) -> None:
+def _save_session_file(session_id: str, turns: List[Dict[str, str]]) -> None:
     try:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         p = (SESSIONS_DIR / f"{session_id}.json").resolve()
         p.write_text(_safe_json({"turns": turns[-30:]}), encoding="utf-8")
     except Exception:
         pass
+
+
+def _load_session(session_id: str) -> List[Dict[str, str]]:
+    turns = _load_session_db(session_id)
+    if turns:
+        return turns
+    return _load_session_file(session_id)
+
+
+def _save_session(session_id: str, bot_id: str, turns: List[Dict[str, str]]) -> None:
+    _save_session_db(session_id, bot_id, turns)
+    _save_session_file(session_id, turns)
 
 
 def _log_line(payload: Dict[str, Any]) -> None:
@@ -319,6 +374,13 @@ def _build_snapshot(*, bot_id: str) -> Tuple[Dict[str, Any], List[ToolResult], L
     return snapshot, tool_results, citations
 
 
+def build_ops_snapshot(*, bot_id: str) -> Tuple[Dict[str, Any], List[ToolResult], List[Dict[str, Any]]]:
+    """
+    Public wrapper used by /api/v1/assistant/context (and by the OpenAI assistant itself).
+    """
+    return _build_snapshot(bot_id=bot_id)
+
+
 @dataclass(frozen=True)
 class OpenAIAssistantConfig:
     repo_root: Path
@@ -434,7 +496,7 @@ class OpenAIAssistant:
             except Exception as exc:
                 reply = f"AI (OpenAI) no disponible: {exc}"
                 turns.append({"role": "assistant", "content": reply})
-                _save_session(session_key, turns)
+                _save_session(session_key, bot_id, turns)
                 _log_line({"ts_utc": ts, "session_id": session_key, "bot_id": bot_id, "error": str(exc)})
                 return {
                     "ok": False,
@@ -491,7 +553,7 @@ class OpenAIAssistant:
             reply_text = "No response."
 
         turns.append({"role": "assistant", "content": reply_text})
-        _save_session(session_key, turns)
+        _save_session(session_key, bot_id, turns)
         _log_line(
             {
                 "ts_utc": ts,
@@ -529,3 +591,26 @@ def get_openai_assistant(repo_root: Path) -> OpenAIAssistant:
         model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
         openai_assistant_singleton = OpenAIAssistant(OpenAIAssistantConfig(repo_root=repo_root, model=model))
     return openai_assistant_singleton
+
+
+_rate_state: Dict[str, List[float]] = {}
+
+
+def rate_limit_check(*, key: str, limit: int = 30, window_sec: int = 300) -> bool:
+    """
+    Simple in-process rate limiter.
+    Returns True if allowed, False if rate-limited.
+    """
+    try:
+        now = datetime.now(timezone.utc).timestamp()
+        bucket = _rate_state.get(key) or []
+        cutoff = now - float(window_sec)
+        bucket = [t for t in bucket if t >= cutoff]
+        if len(bucket) >= int(limit):
+            _rate_state[key] = bucket
+            return False
+        bucket.append(now)
+        _rate_state[key] = bucket
+        return True
+    except Exception:
+        return True

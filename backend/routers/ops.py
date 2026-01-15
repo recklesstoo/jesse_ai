@@ -4,6 +4,8 @@ import csv
 import io
 import json
 import secrets
+import os
+import time
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,10 +28,14 @@ from backend.models import (
 )
 from backend.state import _get_bot_state, compute_feed_status, state_lock
 from backend.assistant.chat import get_openai_assistant
+from backend.assistant.chat import build_ops_snapshot
+from backend.assistant.chat import rate_limit_check
+from pathlib import Path
 
 router = APIRouter()
 
 _cleanup_tokens: Dict[str, Dict[str, Any]] = {}
+_ASSISTANT_REQ_LOG = (Path(__file__).resolve().parents[2] / "logs" / "assistant_requests.jsonl")
 
 
 def _utc_now() -> datetime:
@@ -228,6 +234,8 @@ async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db))
     bot_id = payload.get("botId") or "bot-1"
     message = (payload.get("message") or "").strip()
     include_web = bool(payload.get("includeWeb") or False)
+    request_id = f"asst_{secrets.token_hex(6)}"
+    t0 = time.time()
     if include_web:
         # Placeholder: web is intentionally off by default and not implemented.
         pass
@@ -236,11 +244,77 @@ async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db))
     ops_mode = bool(payload.get("opsMode") if "opsMode" in payload else True)
     session_id = payload.get("sessionId")
 
+    # Rate limit by session_id or bot_id (best-effort).
+    rl_key = str(session_id or f"anon:{bot_id}")
+    if not rate_limit_check(key=rl_key, limit=30, window_sec=300):
+        return {
+            "ok": False,
+            "reply": "Rate limited. Espera un momento y reintenta.",
+            "status": {"ok": False, "error": "rate_limited", "request_id": request_id},
+        }
+
+    # Optional protection: require a token to enable opsMode tools from the dashboard.
+    required = (os.getenv("WYCKOFF_AI_OPS_TOKEN") or "").strip()
+    if required:
+        provided = str(payload.get("opsToken") or "").strip()
+        if ops_mode and provided != required:
+            ops_mode = False
+            message = (
+                message
+                + "\n\n[system] opsMode disabled: missing/invalid ops token. Ask the operator to set WYCKOFF_AI_OPS_TOKEN and provide opsToken."
+            )
+
     # OpenAI-powered assistant (read-only). If not configured, returns a clear setup message.
     assistant = get_openai_assistant(PROJECT_ROOT)
     res = assistant.chat(bot_id=bot_id, message=message, ops_mode=ops_mode, include_web=include_web, session_id=session_id)
     res.setdefault("ok", True)
+    try:
+        dt_ms = int(max(0.0, (time.time() - t0) * 1000.0))
+        status = res.get("status") or {}
+        if isinstance(status, dict):
+            status.setdefault("request_id", request_id)
+            status.setdefault("duration_ms", dt_ms)
+            status.setdefault("ops_mode", ops_mode)
+            res["status"] = status
+        _ASSISTANT_REQ_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _ASSISTANT_REQ_LOG.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "ts_utc": _iso(datetime.utcnow()),
+                        "request_id": request_id,
+                        "bot_id": bot_id,
+                        "session_id": session_id,
+                        "ops_mode": ops_mode,
+                        "include_web": include_web,
+                        "duration_ms": dt_ms,
+                        "tools": [tc.get("name") for tc in (res.get("tool_calls") or []) if isinstance(tc, dict)],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
     return res
+
+
+@router.get("/api/v1/assistant/context")
+async def assistant_context(
+    bot_id: str = Query("bot-1", alias="botId"),
+) -> Dict[str, Any]:
+    """
+    Stable, read-only context snapshot for the dashboard AI panel.
+    Includes state/monitor/commands/data/swarm + market metrics (1m/5m) with confidence gating.
+    """
+    snapshot, tool_results, citations = build_ops_snapshot(bot_id=bot_id)
+    return {
+        "ok": True,
+        "botId": bot_id,
+        "snapshot": snapshot,
+        "tool_results": [tr.__dict__ for tr in tool_results],
+        "citations": citations,
+    }
 
     computed = compute_feed_status(bot_id)
     state = _get_bot_state(bot_id)

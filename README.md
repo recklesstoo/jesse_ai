@@ -118,6 +118,10 @@ Quick test (PowerShell):
 - `$env:OPENAI_API_KEY="..."; $env:OPENAI_MODEL="gpt-4o-mini"`
 - `curl -X POST http://127.0.0.1:8000/api/v1/assistant/chat -H "Content-Type: application/json" -d "{\"botId\":\"bot-1\",\"message\":\"Qué está pasando ahora?\",\"opsMode\":true,\"includeWeb\":false,\"sessionId\":\"demo\"}"`
 
+Where to put the API key:
+- Recommended: copy `.env.example` to `.env` at the repo root and set `OPENAI_API_KEY=...` (the backend loads `D:\\jesse_ai\\.env` via `python-dotenv`).
+- Alternative (PowerShell): `$env:OPENAI_API_KEY="..."`
+
 ### Wyckoff Doctor Trader (persona)
 
 `POST /api/v1/assistant/chat` habla como “doctor en finanzas” con mentalidad agresiva y realista de trader:

@@ -1,21 +1,57 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
+const SESSION_KEY = "wyckoff_ai_session_id";
+const CHAT_KEY_PREFIX = "wyckoff_ai_chat_";
 
 export default function AIAssistantPanel({ botId }) {
   const [opsMode, setOpsMode] = useState(true);
   const [includeWeb, setIncludeWeb] = useState(false);
+  const [opsToken, setOpsToken] = useState(() => {
+    try {
+      return localStorage.getItem("wyckoff_ai_ops_token") || "";
+    } catch {
+      return "";
+    }
+  });
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [offline, setOffline] = useState(false);
 
   const sessionId = useMemo(() => {
     try {
-      return crypto.randomUUID();
+      const existing = localStorage.getItem(SESSION_KEY);
+      if (existing) return existing;
+      const id = crypto.randomUUID();
+      localStorage.setItem(SESSION_KEY, id);
+      return id;
     } catch {
       return `sess_${Math.random().toString(16).slice(2)}`;
     }
   }, []);
+
+  useEffect(() => {
+    try {
+      const key = `${CHAT_KEY_PREFIX}${botId || "bot-1"}`;
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) setChat(parsed.slice(-50));
+      }
+    } catch {
+      // ignore
+    }
+  }, [botId]);
+
+  useEffect(() => {
+    try {
+      const key = `${CHAT_KEY_PREFIX}${botId || "bot-1"}`;
+      localStorage.setItem(key, JSON.stringify(chat.slice(-50)));
+    } catch {
+      // ignore
+    }
+  }, [chat, botId]);
 
   const send = async (text) => {
     const msg = (text || "").trim();
@@ -24,10 +60,18 @@ export default function AIAssistantPanel({ botId }) {
     setMessage("");
     setLoading(true);
     try {
+      setOffline(false);
       const res = await fetch(`${API_BASE}/api/v1/assistant/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: msg, botId, opsMode: Boolean(opsMode), includeWeb: Boolean(includeWeb), sessionId })
+        body: JSON.stringify({
+          message: msg,
+          botId,
+          opsMode: Boolean(opsMode),
+          includeWeb: Boolean(includeWeb),
+          sessionId,
+          opsToken: opsToken || undefined,
+        })
       });
       const data = await res.json();
       setChat((prev) => [
@@ -42,6 +86,7 @@ export default function AIAssistantPanel({ botId }) {
         }
       ]);
     } catch {
+      setOffline(true);
       setChat((prev) => [...prev, { role: "assistant", content: "AI endpoint unavailable." }]);
     } finally {
       setLoading(false);
@@ -62,6 +107,27 @@ export default function AIAssistantPanel({ botId }) {
             includeWeb
           </label>
         </div>
+      </div>
+
+      {offline && <div className="error-banner">Backend offline / API unreachable (chat will not update).</div>}
+
+      <div className="config-grid" style={{ gridTemplateColumns: "1fr auto" }}>
+        <input
+          value={opsToken}
+          onChange={(e) => {
+            const v = e.target.value;
+            setOpsToken(v);
+            try {
+              localStorage.setItem("wyckoff_ai_ops_token", v);
+            } catch {
+              // ignore
+            }
+          }}
+          placeholder="opsToken (optional)"
+        />
+        <button className="pill" onClick={() => setChat([])} disabled={loading}>
+          CLEAR
+        </button>
       </div>
 
       <div className="config-grid" style={{ gridTemplateColumns: "1fr auto" }}>

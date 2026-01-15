@@ -166,3 +166,13 @@ class IngestEvent(Base):
     level = Column(String, default="INFO", index=True)
     message = Column(String)
     data = Column(JSON)
+
+
+class AssistantSession(Base):
+    __tablename__ = "assistant_sessions"
+
+    session_id = Column(String, primary_key=True)
+    bot_id = Column(String, index=True)
+    provider = Column(String, default="openai", index=True)
+    turns = Column(JSON)  # list[{role, content}]
+    updated_at_utc = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, index=True)
