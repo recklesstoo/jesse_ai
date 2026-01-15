@@ -1227,6 +1227,15 @@ export default function App() {
     if (ntMode === "BACKTEST") return "BACKTEST";
     return "UNKNOWN";
   }, [backendMode, feedOk, ntMode]);
+
+  const priceIsReal = dataSourceStream === "NINJA" && bridgeConnected && feedOk;
+  const displayPrice = priceIsReal ? formatNum(bar.price, 2) : "--";
+  const displayOpen = priceIsReal ? formatNum(bar.ohlc.open, 2) : "--";
+  const displayHigh = priceIsReal ? formatNum(bar.ohlc.high, 2) : "--";
+  const displayLow = priceIsReal ? formatNum(bar.ohlc.low, 2) : "--";
+  const displayClose = priceIsReal ? formatNum(bar.ohlc.close, 2) : "--";
+  const displayVol = priceIsReal ? formatNum(bar.volume, 0) : "--";
+  const displayLastBar = priceIsReal ? formatTime(bar.timestamp) : "--";
   const wsStaleSec = useMemo(() => {
     const value = feedState?.ws_stale_sec;
     if (value === null || value === undefined) return 2;
@@ -2057,11 +2066,3 @@ export default function App() {
     </div>
   );
 }
-  const priceIsReal = dataSourceStream === "NINJA" && bridgeConnected && feedOk;
-  const displayPrice = priceIsReal ? formatNum(bar.price, 2) : "--";
-  const displayOpen = priceIsReal ? formatNum(bar.ohlc.open, 2) : "--";
-  const displayHigh = priceIsReal ? formatNum(bar.ohlc.high, 2) : "--";
-  const displayLow = priceIsReal ? formatNum(bar.ohlc.low, 2) : "--";
-  const displayClose = priceIsReal ? formatNum(bar.ohlc.close, 2) : "--";
-  const displayVol = priceIsReal ? formatNum(bar.volume, 0) : "--";
-  const displayLastBar = priceIsReal ? formatTime(bar.timestamp) : "--";

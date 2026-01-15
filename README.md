@@ -119,6 +119,9 @@ Logs: `logs/ai_assistant.log` (and `logs/ai_web.log` only if web tools are enabl
 
 ## Fix: UI crash on startup
 
+Root cause of the blank screen: `frontend/src/App.jsx` contained stray derived constants **after** the component export, so the module threw on import (`ReferenceError: dataSourceStream is not defined`) and React never mounted.
+Fix: moved the derived display fields back inside `App()` and added a bootstrap guard in `frontend/src/main.jsx` that renders a startup error panel instead of a silent blank screen if a module fails before React mounts.
+
 The dashboard uses a React `ErrorBoundary`. Previously it swallowed the real exception details (state mutation bug), making startup crashes show only “Something went wrong.”.
 The ErrorBoundary now shows the full `message`, `stack`, and `componentStack` in DEV (and provides “Copy diagnostic” in PROD), so the root cause is visible and actionable. Proxying `/api` and `/ws` through Vite on port `3001` is also enforced (`strictPort`) and validated via `npm run doctor:ui`.
 
