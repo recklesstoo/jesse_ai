@@ -121,6 +121,28 @@ def tool_get_status(params: Dict[str, Any]) -> ToolResult:
     )
 
 
+def tool_get_state(params: Dict[str, Any]) -> ToolResult:
+    bot_id = params.get("botId") or params.get("bot_id") or "bot-1"
+    data = _call_get("/api/v1/state", params={"botId": bot_id})
+    return ToolResult(
+        name="tool_get_state",
+        ok=True,
+        data=data,
+        citations=[{"type": "endpoint", "path": "/api/v1/state", "params": {"botId": bot_id}}],
+    )
+
+
+def tool_get_monitor_status(params: Dict[str, Any]) -> ToolResult:
+    bot_id = params.get("botId") or params.get("bot_id") or "bot-1"
+    data = _call_get("/api/v1/monitor/status", params={"botId": bot_id})
+    return ToolResult(
+        name="tool_get_monitor_status",
+        ok=True,
+        data=data,
+        citations=[{"type": "endpoint", "path": "/api/v1/monitor/status", "params": {"botId": bot_id}}],
+    )
+
+
 def tool_get_commands_log(params: Dict[str, Any]) -> ToolResult:
     bot_id = params.get("botId") or params.get("bot_id") or "bot-1"
     limit = int(params.get("limit") or 100)
@@ -130,6 +152,16 @@ def tool_get_commands_log(params: Dict[str, Any]) -> ToolResult:
         ok=True,
         data={"botId": bot_id, "limit": limit, "log": data.get("log") or []},
         citations=[{"type": "endpoint", "path": f"/api/v1/commands/{bot_id}/log", "params": {"limit": limit}}],
+    )
+
+
+def tool_swarm_rank(params: Dict[str, Any]) -> ToolResult:
+    limit = int(params.get("limit") or 10)
+    return ToolResult(
+        name="tool_swarm_rank",
+        ok=True,
+        data=_call_get("/api/v1/swarm/rank", params={"limit": limit}),
+        citations=[{"type": "endpoint", "path": "/api/v1/swarm/rank", "params": {"limit": limit}}],
     )
 
 
@@ -236,8 +268,11 @@ def tool_search_docs(params: Dict[str, Any], *, index: DocIndex) -> ToolResult:
 def build_tool_registry(doc_index: DocIndex) -> Dict[str, ToolFn]:
     return {
         "tool_get_status": tool_get_status,
+        "tool_get_state": tool_get_state,
+        "tool_get_monitor_status": tool_get_monitor_status,
         "tool_list_bots": tool_list_bots,
         "tool_get_swarm_rank": tool_get_swarm_rank,
+        "tool_swarm_rank": tool_swarm_rank,
         "tool_get_data_summary": tool_get_data_summary,
         "tool_get_recent_events": tool_get_recent_events,
         "tool_get_recent_bars": tool_get_recent_bars,

@@ -25,7 +25,7 @@ from backend.models import (
     DATA_SOURCE_SIMULATED,
 )
 from backend.state import _get_bot_state, compute_feed_status, state_lock
-from backend.assistant.service import get_assistant_service
+from backend.assistant.chat import get_openai_assistant
 
 router = APIRouter()
 
@@ -235,12 +235,9 @@ async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db))
     # New assistant pipeline (keep legacy fallback code below for safety).
     ops_mode = bool(payload.get("opsMode") if "opsMode" in payload else True)
     session_id = payload.get("sessionId")
-    assistant = get_assistant_service(PROJECT_ROOT)
-    if not assistant.doc_index.built:
-        try:
-            assistant.build_index()
-        except Exception:
-            pass
+
+    # OpenAI-powered assistant (read-only). If not configured, returns a clear setup message.
+    assistant = get_openai_assistant(PROJECT_ROOT)
     res = assistant.chat(bot_id=bot_id, message=message, ops_mode=ops_mode, include_web=include_web, session_id=session_id)
     res.setdefault("ok", True)
     return res

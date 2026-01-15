@@ -26,8 +26,15 @@ def main() -> int:
         print("FAIL: missing reply")
         print(json.dumps(data, indent=2))
         return 1
-    if not any((tc or {}).get("name") == "tool_get_status" for tc in (data.get("tool_calls") or [])):
-        print("FAIL: expected tool_get_status in tool_calls")
+
+    # If OpenAI is not configured, the endpoint should return a clear diagnostic (but still 200).
+    if not (os.getenv("OPENAI_API_KEY") or "").strip():
+        print("OK (OPENAI_API_KEY not set; assistant returned a diagnostic reply)")
+        return 0
+
+    tool_results = data.get("tool_results") or []
+    if not any((tr or {}).get("name") in ("tool_get_state", "tool_get_monitor_status", "tool_get_commands_log") for tr in tool_results):
+        print("FAIL: expected at least one ops tool result in tool_results")
         print(json.dumps(data, indent=2))
         return 1
     print("OK")

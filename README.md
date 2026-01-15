@@ -108,6 +108,15 @@ The Advanced AI Assistant is a read-only operator. It can summarize health, diag
   - `opsMode=true` enables read-only tool calls to real endpoints (`/state`, `/monitor/status`, `/execution/status`, `/swarm/rank`, `/events`, `/data/summary`).
   - `includeWeb=true` allows optional web search results (if configured) and they are labeled as WEB sources.
 
+OpenAI ChatGPT configuration (no local LLM):
+- `OPENAI_API_KEY` (required)
+- `OPENAI_MODEL` (optional, default `gpt-4o-mini`)
+- `OPENAI_BASE_URL` (optional, default `https://api.openai.com/v1/chat/completions`)
+
+Quick test (PowerShell):
+- `$env:OPENAI_API_KEY="..."; $env:OPENAI_MODEL="gpt-4o-mini"`
+- `curl -X POST http://127.0.0.1:8000/api/v1/assistant/chat -H "Content-Type: application/json" -d "{\"botId\":\"bot-1\",\"message\":\"Qué está pasando ahora?\",\"opsMode\":true,\"includeWeb\":false,\"sessionId\":\"demo\"}"`
+
 ### Wyckoff Doctor Trader (persona)
 
 `POST /api/v1/assistant/chat` habla como “doctor en finanzas” con mentalidad agresiva y realista de trader:

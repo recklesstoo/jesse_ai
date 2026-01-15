@@ -65,7 +65,11 @@ export default function AIAssistantPanel({ botId }) {
       </div>
 
       <div className="config-grid" style={{ gridTemplateColumns: "1fr auto" }}>
-        <input value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Ask about health, bots, swarm, events, data..." />
+        <input
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          placeholder="Pregúntame lo que sea (diagnóstico, bots, feed, datos). No ejecuto órdenes."
+        />
         <button className="pill pill-action" onClick={() => send(message)} disabled={loading}>
           {loading ? "..." : "SEND"}
         </button>
