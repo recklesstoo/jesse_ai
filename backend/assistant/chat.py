@@ -14,6 +14,7 @@ from backend.assistant.tools import ToolCall, ToolFn, ToolResult
 from backend.assistant.tools import (
     tool_get_commands_log,
     tool_get_data_summary,
+    tool_get_market_metrics,
     tool_get_monitor_status,
     tool_get_state,
     tool_swarm_rank,
@@ -109,6 +110,7 @@ def _tool_registry() -> Dict[str, ToolFn]:
         "tool_get_commands_log": tool_get_commands_log,
         "tool_get_data_summary": tool_get_data_summary,
         "tool_swarm_rank": tool_swarm_rank,
+        "tool_get_market_metrics": tool_get_market_metrics,
     }
 
 
@@ -183,6 +185,23 @@ def _tool_schemas() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_get_market_metrics",
+                "description": "Fetch deterministic market metrics computed from LIVE_WS bars (read-only).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "timeframe": {"type": "string", "description": "1m|5m"},
+                        "lookback": {"type": "integer", "minimum": 10, "maximum": 2000},
+                        "mode": {"type": "string", "description": "summary|full"},
+                    },
+                    "required": ["symbol", "timeframe"],
+                },
+            },
+        },
     ]
 
 
@@ -206,6 +225,14 @@ def _build_snapshot(*, bot_id: str) -> Tuple[Dict[str, Any], List[ToolResult], L
     commands = run("tool_get_commands_log", {"botId": bot_id, "limit": 20})
     data_summary = run("tool_get_data_summary", {"includeDays": True})
     swarm = run("tool_swarm_rank", {"limit": 10})
+    symbol = "MNQ"
+    try:
+        if isinstance(state, dict):
+            symbol = str(state.get("instrument") or "MNQ").upper()
+    except Exception:
+        symbol = "MNQ"
+    market_1m = run("tool_get_market_metrics", {"symbol": symbol, "timeframe": "1m", "lookback": 500, "mode": "summary"})
+    market_5m = run("tool_get_market_metrics", {"symbol": symbol, "timeframe": "5m", "lookback": 500, "mode": "summary"})
 
     # Keep snapshot compact and stable: only include key fields + recent log lines.
     snapshot: Dict[str, Any] = {"botId": bot_id, "ts_utc": _utc_iso()}
@@ -252,6 +279,42 @@ def _build_snapshot(*, bot_id: str) -> Tuple[Dict[str, Any], List[ToolResult], L
 
     if isinstance(swarm, dict):
         snapshot["swarm_top"] = (swarm.get("rank") or [])[:10]
+
+    def _compact_market(m: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(m, dict):
+            return None
+        metrics = m.get("metrics") or {}
+        base = (metrics.get("base") or {}) if isinstance(metrics, dict) else {}
+        wy = (metrics.get("wyckoff") or {}) if isinstance(metrics, dict) else {}
+        tr = (metrics.get("trend_pullback") or {}) if isinstance(metrics, dict) else {}
+        return {
+            "source": m.get("source"),
+            "feed_status": m.get("feed_status"),
+            "confidence": m.get("confidence"),
+            "ages": m.get("ages"),
+            "last_bar_ts_utc": (m.get("timestamps") or {}).get("last_bar_ts_utc") if isinstance(m.get("timestamps"), dict) else None,
+            "base": {
+                "last_price": base.get("last_price"),
+                "atr_14_ticks": base.get("atr_14_ticks"),
+                "true_range_last_ticks": base.get("true_range_last_ticks"),
+                "spread_ticks": base.get("spread_ticks"),
+            },
+            "wyckoff": {
+                "rvol_20": wy.get("rvol_20"),
+                "vol_zscore_50": wy.get("vol_zscore_50"),
+                "event": ((wy.get("events") or {}).get("spring_upthrust") if isinstance(wy.get("events"), dict) else None)
+                or ((wy.get("events") or {}).get("sweep") if isinstance(wy.get("events"), dict) else None)
+                or ((wy.get("events") or {}).get("climax_bar") if isinstance(wy.get("events"), dict) else None),
+            },
+            "trend_pullback": {"linreg_r2_50": tr.get("linreg_r2_50"), "linreg_slope_50_atr_norm": tr.get("linreg_slope_50_atr_norm")},
+            "notes": m.get("notes"),
+        }
+
+    snapshot["market"] = {
+        "symbol": symbol,
+        "m1": _compact_market(market_1m),
+        "m5": _compact_market(market_5m),
+    }
 
     return snapshot, tool_results, citations
 
@@ -466,4 +529,3 @@ def get_openai_assistant(repo_root: Path) -> OpenAIAssistant:
         model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
         openai_assistant_singleton = OpenAIAssistant(OpenAIAssistantConfig(repo_root=repo_root, model=model))
     return openai_assistant_singleton
-

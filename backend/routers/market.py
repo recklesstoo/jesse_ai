@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -50,6 +50,8 @@ from backend.state import (
     state_lock,
     ws_bots,
 )
+from backend.market.buffer import market_buffer
+from backend.market.metrics import compute_market_metrics_v1
 
 router = APIRouter()
 
@@ -562,3 +564,74 @@ async def cal_refresh(days: int = 7) -> Dict[str, Any]:
     _calendar_state["last_refresh"] = _iso(datetime.utcnow())
     _calendar_state["events"] = []
     return {"ok": True, "last_refresh": _calendar_state["last_refresh"], "days": days}
+
+
+@router.get("/api/v1/market/metrics")
+async def market_metrics(
+    symbol: str = Query(..., description="Symbol, e.g. MNQ"),
+    timeframe: str = Query(..., description="Timeframe code: 1m|5m"),
+    lookback: int = Query(500, ge=10, le=2000),
+    mode: str = Query("summary", description="summary|full"),
+) -> Dict[str, Any]:
+    """
+    Deterministic market snapshot + metrics computed from LIVE_WS bars (ring-buffer).
+    This endpoint is read-only and designed for the conversational assistant.
+    """
+    tf = str(timeframe).strip().lower()
+    if tf not in ("1m", "5m"):
+        raise HTTPException(status_code=400, detail="timeframe must be one of: 1m, 5m")
+
+    bot_id = "bot-1"
+    now = datetime.now(timezone.utc)
+
+    async with state_lock:
+        computed = compute_feed_status(bot_id)
+        st = dict(_get_bot_state(bot_id))
+
+    last_seen = st.get("last_seen_utc") or st.get("last_ws_rx_utc")
+    last_ws_ts_utc: Optional[str] = None
+    ws_age_sec: Optional[float] = None
+    try:
+        if last_seen:
+            s = str(last_seen)
+            if s.endswith("Z"):
+                s = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(timezone.utc)
+            last_ws_ts_utc = dt.isoformat().replace("+00:00", "Z")
+            ws_age_sec = float(max(0.0, (now - dt).total_seconds()))
+    except Exception:
+        ws_age_sec = None
+
+    bars = market_buffer.get_bars(symbol=symbol, timeframe=tf, limit=lookback)
+    resp, notes = compute_market_metrics_v1(
+        bars=bars,
+        symbol=symbol.upper(),
+        timeframe=tf,
+        ws_age_sec=ws_age_sec,
+        last_ws_ts_utc=last_ws_ts_utc,
+        ws_stale_sec=10.0,
+        lookback=lookback,
+        mode=mode,
+    )
+
+    # Coherence with platform truth (anti-invention):
+    data_source = (computed.get("data_source") or "UNKNOWN").upper()
+    if data_source != "LIVE_WS":
+        resp["source"] = data_source
+        resp["feed_status"] = "NO_LIVE"
+        resp["confidence"] = "low"
+        notes.append(f"non-live data_source={data_source}")
+    else:
+        resp["source"] = "LIVE_WS"
+
+    if (computed.get("feed_status") or "").upper() != "LIVE":
+        if resp.get("feed_status") == "OK":
+            resp["feed_status"] = "STALE"
+        resp["confidence"] = "low"
+        notes.append(f"platform feed_status={computed.get('feed_status')}")
+
+    resp["notes"] = list(dict.fromkeys(notes))
+    return resp

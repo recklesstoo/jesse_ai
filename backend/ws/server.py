@@ -20,6 +20,7 @@ from backend.models import (
     DATA_SOURCE_SIMULATED,
 )
 from backend.services.ml_service import ml_service
+from backend.market.buffer import MarketBar, market_buffer
 from backend.state import (
     AI_MIN_LIVE_BARS,
     _append_log,
@@ -378,6 +379,8 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
     l = _safe_float(payload.get("low"))
     c = _safe_float(payload.get("close"))
     vol = _safe_int(payload.get("volume"))
+    bid = _safe_float(payload.get("bid") or payload.get("Bid"))
+    ask = _safe_float(payload.get("ask") or payload.get("Ask"))
 
     if ts is None:
         # Never crash the WS if a BAR_DATA arrives without a valid timestamp.
@@ -434,6 +437,26 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
                     state["bar_interval_ms"] = diff_ms
             except Exception:
                 pass
+
+    # Update market ring-buffer (symbol+timeframe) for deterministic market metrics.
+    try:
+        market_buffer.add_bar(
+            MarketBar(
+                ts_utc=ts.astimezone(timezone.utc),
+                symbol=str(symbol),
+                timeframe=str(timeframe or ""),
+                open=float(o or 0.0),
+                high=float(h or 0.0),
+                low=float(l or 0.0),
+                close=float(c or 0.0),
+                volume=int(vol or 0),
+                bid=float(bid) if bid is not None else None,
+                ask=float(ask) if ask is not None else None,
+            )
+        )
+    except Exception:
+        # Never break WS path on metrics cache updates.
+        pass
 
     asyncio.create_task(asyncio.to_thread(_save_bar_sync, bot_id, payload))
     asyncio.create_task(

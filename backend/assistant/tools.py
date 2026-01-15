@@ -98,6 +98,20 @@ def tool_get_data_summary(params: Dict[str, Any]) -> ToolResult:
     )
 
 
+def tool_get_market_metrics(params: Dict[str, Any]) -> ToolResult:
+    symbol = (params.get("symbol") or "MNQ").upper().strip()
+    timeframe = str(params.get("timeframe") or "1m").strip().lower()
+    lookback = int(params.get("lookback") or 500)
+    lookback = max(10, min(2000, lookback))
+    mode = str(params.get("mode") or "summary").strip().lower()
+    q = {"symbol": symbol, "timeframe": timeframe, "lookback": lookback, "mode": mode}
+    return ToolResult(
+        name="tool_get_market_metrics",
+        ok=True,
+        data=_call_get("/api/v1/market/metrics", params=q),
+        citations=[{"type": "endpoint", "path": "/api/v1/market/metrics", "params": q}],
+    )
+
 def tool_get_status(params: Dict[str, Any]) -> ToolResult:
     bot_id = params.get("botId") or params.get("bot_id") or "bot-1"
     state = _call_get("/api/v1/state", params={"botId": bot_id})
@@ -274,6 +288,7 @@ def build_tool_registry(doc_index: DocIndex) -> Dict[str, ToolFn]:
         "tool_get_swarm_rank": tool_get_swarm_rank,
         "tool_swarm_rank": tool_swarm_rank,
         "tool_get_data_summary": tool_get_data_summary,
+        "tool_get_market_metrics": tool_get_market_metrics,
         "tool_get_recent_events": tool_get_recent_events,
         "tool_get_recent_bars": tool_get_recent_bars,
         "tool_get_recent_trades": tool_get_recent_trades,

@@ -107,6 +107,7 @@ The Advanced AI Assistant is a read-only operator. It can summarize health, diag
 - Ops chat (tools + local-doc RAG): `POST http://127.0.0.1:8000/api/v1/assistant/chat` body `{ "botId":"bot-1", "message":"...", "opsMode": true, "includeWeb": false, "sessionId":"optional" }`
   - `opsMode=true` enables read-only tool calls to real endpoints (`/state`, `/monitor/status`, `/execution/status`, `/swarm/rank`, `/events`, `/data/summary`).
   - `includeWeb=true` allows optional web search results (if configured) and they are labeled as WEB sources.
+  - Market metrics (Wyckoff/trend/FVG, deterministic): `GET http://127.0.0.1:8000/api/v1/market/metrics?symbol=MNQ&timeframe=1m&lookback=500&mode=summary`
 
 OpenAI ChatGPT configuration (no local LLM):
 - `OPENAI_API_KEY` (required)
