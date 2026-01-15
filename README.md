@@ -67,6 +67,8 @@ Execution gating (backend policy):
 The top badges are driven by `GET http://127.0.0.1:8000/api/v1/state?botId=...` and are computed server-side in **UTC**:
 
 - `CONNECTED`: the BridgePuppet socket is connected (`ws_connected=true`).
+- `ws_open` + `last_seen_utc`: `last_seen_utc` is updated only when a **real WS message** arrives from Ninja (`BAR_DATA` / `HEARTBEAT`). It is always the server receive time in UTC (never the payload timestamp).
+- `bar_ts_utc`: timestamp parsed from the incoming bar payload (if present). This is separate from `last_seen_utc` on purpose.
 - `NT MODE`: derived from the latest Ninja `payload.mode` (`LIVE` / `BACKTEST` / `UNKNOWN`).
 - `MODE`: derived from bot state + NT mode (`mode`: `LIVE` / `BACKTEST` / `SIM` / `UNKNOWN`).
 - `WS AGE`: seconds since the last Ninja WS event received (`ws_age_sec`, any message type).
@@ -75,6 +77,10 @@ The top badges are driven by `GET http://127.0.0.1:8000/api/v1/state?botId=...` 
 - `MON AGE` + `MONITOR`: seconds since the last `MONITOR` was received (`monitor_age_sec`) and `monitor_status` (`NO_MONITOR` / `OK` / `STALE`).
 
 Note: `BAR AGE`/staleness is computed from the server-side receive time (not the payload timestamp) to avoid false STALE during backtests or clock drift.
+
+### Regla de “Connected” (Ninja real)
+
+El badge **CONNECTED** en UI significa: `ws_open=true` y `last_seen_age_seconds <= 5`. Si no se cumple, el UI no muestra precios/OHLC como reales y marca `CACHED/SIMULATED/UNKNOWN_TS` explícitamente (sin ilusión de LIVE).
 
 ## Bot Registry / Timeline / Swarm (read-only)
 

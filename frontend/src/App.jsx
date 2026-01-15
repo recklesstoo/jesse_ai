@@ -1210,6 +1210,7 @@ export default function App() {
   }, [feedState?.bar_age_sec]);
 
   const dataSource = (feedState?.data_source || "NONE").toUpperCase();
+  const dataSourceStream = (feedState?.data_source_stream || "UNKNOWN").toUpperCase();
   const feedOk = dataSource === "LIVE_WS" && feedState?.feed_status === "LIVE";
   const monitorOk = feedState?.monitor_status === "OK";
   const monitorAgeSec = useMemo(() => {
@@ -1217,7 +1218,7 @@ export default function App() {
     if (value === null || value === undefined) return null;
     return Math.max(0, Math.round(Number(value)));
   }, [feedState?.monitor_age_sec]);
-  const bridgeConnected = Boolean(feedState?.ws_connected);
+  const bridgeConnected = Boolean(feedState?.ws_open) && Number(feedState?.last_seen_age_seconds ?? 1e9) <= 5;
   const ntMode = (feedState?.nt_mode || "UNKNOWN").toUpperCase();
   const backendMode = (feedState?.mode || "UNKNOWN").toUpperCase();
   const platformMode = useMemo(() => {
@@ -1466,9 +1467,17 @@ export default function App() {
                   ? "pill-warn"
                   : ""
             }`}
-            title={feedState?.data_source_kind ? `source=${feedState.data_source_kind}` : ""}
+            title={`stream=${dataSourceStream} botId=${BOT_ID}`}
           >
-            {dataSource === "CACHED" ? "DATA CACHED" : `SRC ${dataSource}`}
+            {dataSourceStream === "NINJA"
+              ? "SRC NINJA"
+              : dataSource === "CACHED"
+                ? "CACHED"
+                : dataSource === "SIMULATED"
+                  ? "SIMULATED"
+                  : dataSource === "UNKNOWN_TS"
+                    ? "UNKNOWN_TS"
+                    : `SRC ${dataSource}`}
           </span>
           <span className={`pill ${healthOk ? "pill-ok" : "pill-warn"}`}>
             HEALTH {healthOk ? "OK" : "--"}
@@ -1561,38 +1570,38 @@ export default function App() {
           <div className="card-header">
             <span className="label">SYMBOL</span>
             <span className={`status-dot ${feedOk ? "ok" : "warn"}`}>
-              {feedOk ? "LIVE" : dataSource === "CACHED" ? "DATA CACHED" : bar.timestamp ? "STALE" : "WAITING FOR NINJA"}
+              {priceIsReal ? "LIVE (NINJA)" : dataSourceStream === "CACHED" ? "CACHED" : dataSourceStream === "SIMULATED" ? "SIMULATED" : "WAITING FOR NINJA"}
             </span>
           </div>
           <div className="price-row">
             <div className="symbol">{bar.symbol || "MNQ"}</div>
-            <div className="price">{formatNum(bar.price, 2)}</div>
+            <div className="price">{displayPrice}</div>
             <div className="price-ccy">USD</div>
           </div>
           <div className="ohlc-grid">
             <div>
               <div className="label">OPEN</div>
-              <div className="value">{formatNum(bar.ohlc.open, 2)}</div>
+              <div className="value">{displayOpen}</div>
             </div>
             <div>
               <div className="label">HIGH</div>
-              <div className="value">{formatNum(bar.ohlc.high, 2)}</div>
+              <div className="value">{displayHigh}</div>
             </div>
             <div>
               <div className="label">LOW</div>
-              <div className="value">{formatNum(bar.ohlc.low, 2)}</div>
+              <div className="value">{displayLow}</div>
             </div>
             <div>
               <div className="label">CLOSE</div>
-              <div className="value">{formatNum(bar.ohlc.close, 2)}</div>
+              <div className="value">{displayClose}</div>
             </div>
             <div>
               <div className="label">VOLUME</div>
-              <div className="value">{formatNum(bar.volume, 0)}</div>
+              <div className="value">{displayVol}</div>
             </div>
             <div>
               <div className="label">LAST BAR</div>
-              <div className="value">{formatTime(bar.timestamp)}</div>
+              <div className="value">{displayLastBar}</div>
             </div>
           </div>
         </section>
@@ -2048,3 +2057,11 @@ export default function App() {
     </div>
   );
 }
+  const priceIsReal = dataSourceStream === "NINJA" && bridgeConnected && feedOk;
+  const displayPrice = priceIsReal ? formatNum(bar.price, 2) : "--";
+  const displayOpen = priceIsReal ? formatNum(bar.ohlc.open, 2) : "--";
+  const displayHigh = priceIsReal ? formatNum(bar.ohlc.high, 2) : "--";
+  const displayLow = priceIsReal ? formatNum(bar.ohlc.low, 2) : "--";
+  const displayClose = priceIsReal ? formatNum(bar.ohlc.close, 2) : "--";
+  const displayVol = priceIsReal ? formatNum(bar.volume, 0) : "--";
+  const displayLastBar = priceIsReal ? formatTime(bar.timestamp) : "--";

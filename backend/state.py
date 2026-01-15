@@ -166,6 +166,14 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     now = _utc_now()
 
     ws_connected = bool(state.get("connected"))
+    ws_open = ws_connected
+
+    # last_seen_utc is authoritative: updated only on BAR_DATA/HEARTBEAT receive time.
+    last_seen_dt = _parse_dt(state.get("last_seen_utc"))
+    last_seen_age_sec: Optional[float] = None
+    if last_seen_dt is not None:
+        last_seen_age_sec = (now - last_seen_dt).total_seconds()
+
     last_ws_rx_dt = _parse_dt(state.get("last_ws_rx_utc"))
     ws_age_sec: Optional[float] = None
     if last_ws_rx_dt is not None:
@@ -268,11 +276,33 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     elif ws_age_sec is not None and ws_age_sec > ws_stale_sec:
         feed_reason = f"ws_age_sec>{round(ws_stale_sec, 3)}"
 
+    # Connection health (for "Connected" UI): ws open + last_seen receive time.
+    conn_threshold_sec = 5.0
+    connection_status = "DISCONNECTED"
+    if ws_open:
+        if last_seen_age_sec is not None and last_seen_age_sec <= conn_threshold_sec:
+            connection_status = "OK"
+        else:
+            connection_status = "STALE"
+
+    # Stream source label (UI should treat only NINJA as real-time).
+    data_source_stream = "UNKNOWN"
+    if ws_open and last_seen_age_sec is not None and last_seen_age_sec <= conn_threshold_sec and data_source == "LIVE_WS":
+        data_source_stream = "NINJA"
+    elif data_source in {"CACHED", "SIMULATED", "UNKNOWN_TS"}:
+        data_source_stream = data_source
+    elif data_source == "NONE":
+        data_source_stream = "UNKNOWN"
+
     return {
         "bot_id": bot_id,
         "feed_status": feed_status,
         "ws_connected": ws_connected,
         "transport_connected": ws_connected,
+        "ws_open": ws_open,
+        "last_seen_utc": _iso(last_seen_dt),
+        "last_seen_age_seconds": last_seen_age_sec,
+        "connection_status": connection_status,
         "ws_age_sec": ws_age_sec,
         "ws_stale_sec": ws_stale_sec,
         "monitor_status": monitor_status,
@@ -284,6 +314,7 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
         "nt_mode": nt_mode,
         "data_source": data_source,
         "data_source_kind": data_source_kind,
+        "data_source_stream": data_source_stream,
         "feed_reason": feed_reason,
         "last_mode": state.get("last_mode"),
         "last_bar_ts_utc": last_bar_payload_iso,

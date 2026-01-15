@@ -320,7 +320,6 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
                 _set_bot_state(
                     bot_id,
                     {
-                        "last_seen_utc": _iso(now),
                         "last_ws_rx_utc": _iso(now),
                     },
                 )
@@ -333,6 +332,8 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
 
             if msg_type == "BAR_DATA":
                 await _handle_bar_data(bot_id, payload)
+            elif msg_type in ("HEARTBEAT", "PING"):
+                await _handle_heartbeat(bot_id, payload)
             elif msg_type == "MONITOR":
                 await _handle_monitor(bot_id, payload)
             elif msg_type == "TRADE_EVENT":
@@ -384,6 +385,7 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
             state = _get_bot_state(bot_id)
             state["feed_status"] = "STALE"
             state["data_source"] = "UNKNOWN_TS"
+            state["last_seen_utc"] = _iso(now)
             state["last_bar_rx_utc"] = _iso(now)
             state["last_bad_bar_ts_utc"] = _iso(now)
             state["last_bad_bar_ts_reason"] = "missing_or_invalid_ts"
@@ -399,8 +401,11 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
             instrument=symbol,
             mode=payload.get("mode", current_mode),
         )
+        # last_seen_utc must reflect WS receive time (never payload ts).
+        state["last_seen_utc"] = _iso(now)
         state["last_bar_ts"] = ts_iso
         state["last_bar_payload_ts_utc"] = ts_iso
+        state["bar_ts_utc"] = ts_iso
         state["last_bar_rx_utc"] = _iso(now)
         if payload.get("mode") is not None:
             state["last_mode"] = payload.get("mode")
@@ -453,6 +458,17 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
         }
     )
     await _run_inference_and_update(bot_id, payload)
+
+
+async def _handle_heartbeat(bot_id: str, payload: Dict[str, Any]) -> None:
+    now = datetime.now(timezone.utc)
+    async with state_lock:
+        state = _get_bot_state(bot_id)
+        state["last_seen_utc"] = _iso(now)
+        state["last_heartbeat_rx_utc"] = _iso(now)
+        if payload.get("mode") is not None:
+            state["last_mode"] = payload.get("mode")
+    asyncio.create_task(asyncio.to_thread(_save_event_sync, bot_id, "HEARTBEAT_RX", {"botId": bot_id}))
 
 
 async def _handle_monitor(bot_id: str, payload: Dict[str, Any]) -> None:

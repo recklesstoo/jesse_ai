@@ -69,6 +69,7 @@ async def metrics(botId: str = Query(..., alias="botId")) -> Dict[str, Any]:
 async def monitor_status(botId: str = Query(..., alias="botId")) -> Dict[str, Any]:
     async with state_lock:
         state = _get_bot_state(botId)
+        last_seen_utc = state.get("last_seen_utc")
         last_bar_dt = state.get("last_bar_dt") or state.get("last_bar_ts")
         last_bar_age: Optional[float] = None
         if last_bar_dt:
@@ -106,6 +107,8 @@ async def monitor_status(botId: str = Query(..., alias="botId")) -> Dict[str, An
 
         return {
             "ok": ok,
+            "ws_open": bool(state.get("connected")),
+            "last_seen_utc": last_seen_utc,
             "lastBarTs": state.get("last_bar_ts"),
             "lastBarAgeSec": last_bar_age,
             "lastBarReceivedAgeSec": last_bar_age,
