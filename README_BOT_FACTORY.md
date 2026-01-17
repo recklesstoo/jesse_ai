@@ -33,6 +33,24 @@ curl http://127.0.0.1:8000/api/v1/bots/bot-1
 Schema (generated):
 - `backend/contracts/bot_spec_v1.schema.json`
 
+Supported `setup.kind` values (v1):
+- `trend_pullback_bos`
+- `wyckoff_spring`
+- `wyckoff_upthrust`
+- `wyckoff_sos_lps`
+- `wyckoff_sow_lpsy`
+- `vsa_selling_climax`
+- `vsa_buying_climax`
+- `wyckoff_range_reversion`
+- `opening_range_breakout`
+- `wyckoff_contraction_breakout`
+
+## 5) Create + train 10 Wyckoff bots (presets)
+This will create/update 10 bots (different Wyckoff/VSA templates) and kick off deterministic ML training runs for each:
+```powershell
+./scripts/train_wyckoff_10_bots.ps1 -ApiBase http://127.0.0.1:8000 -Symbol MNQ
+```
+
 ## 2) Run deterministic backtest
 ```powershell
 $run = (curl -s -X POST http://127.0.0.1:8000/api/v1/backtest/run `
@@ -72,4 +90,3 @@ curl "http://127.0.0.1:8000/api/v1/perf/summary?botId=bot-1"
 - Backtest/optimize are **deterministic** and do not stream data.
 - No per-bar DB writes; results are persisted at the end of each run.
 - Live trade execution remains disabled by backend policy; Bot Factory is for research + SIM/backtest only.
-

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -68,6 +70,13 @@ class BotState:
 
     # session tracking
     session_key: str = ""
+
+    # strategy memory (used by some Wyckoff/VSA setups)
+    setup_mem: Dict[str, Any] = field(default_factory=dict)
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
 
 
 def _to_z(dt: datetime) -> str:
@@ -140,10 +149,13 @@ def _true_range(high: float, low: float, prev_close: Optional[float]) -> float:
 def _evaluate_setup(
     *,
     spec: BotSpecV1,
+    setup_mem: Dict[str, Any],
+    bar_index: int,
     close: float,
     open_: float,
     high: float,
     low: float,
+    volume: float,
     ema_trend: float,
     ema_trend_prev: float,
     ema_pull: float,
@@ -151,35 +163,206 @@ def _evaluate_setup(
     bos_ll: float,
     atr: float,
     tick_size: float,
+    atr_ticks: float,
+    range_high: float,
+    range_low: float,
+    rvol20: float,
+    vol_z50: float,
+    spread_ticks: float,
+    or_high: float,
+    or_low: float,
+    or_complete: bool,
 ) -> Decision:
-    # Only supported kind for v1
-    if spec.setup.kind != "trend_pullback_bos":
-        return Decision(action="NONE", confidence=0.0, reason="unsupported_setup")
+    kind = spec.setup.kind
 
-    trend_up = close > ema_trend and ema_trend >= ema_trend_prev
-    trend_down = close < ema_trend and ema_trend <= ema_trend_prev
+    if kind == "trend_pullback_bos":
+        trend_up = close > ema_trend and ema_trend >= ema_trend_prev
+        trend_down = close < ema_trend and ema_trend <= ema_trend_prev
 
-    pull_long = low <= ema_pull <= close
-    pull_short = high >= ema_pull >= close
+        pull_long = low <= ema_pull <= close
+        pull_short = high >= ema_pull >= close
 
-    bos_up = close > bos_hh
-    bos_down = close < bos_ll
+        bos_up = close > bos_hh
+        bos_down = close < bos_ll
 
-    atr_ticks = (atr / tick_size) if tick_size > 0 else 0.0
-    dist_trend_ticks = (abs(close - ema_trend) / tick_size) if tick_size > 0 else 0.0
-    dist_score = min(1.0, dist_trend_ticks / max(1.0, atr_ticks)) if atr_ticks > 0 else 0.0
-    bos_score = 0.45 if (bos_up or bos_down) else 0.0
-    candle_score = 0.15 if (close != open_) else 0.0
+        dist_trend_ticks = (abs(close - ema_trend) / tick_size) if tick_size > 0 else 0.0
+        dist_score = _clamp01(dist_trend_ticks / max(1.0, atr_ticks)) if atr_ticks > 0 else 0.0
+        bos_score = 0.45 if (bos_up or bos_down) else 0.0
+        candle_score = 0.15 if (close != open_) else 0.0
 
-    if trend_up and pull_long and bos_up:
-        conf = max(0.0, min(1.0, 0.25 + dist_score * 0.25 + bos_score + candle_score))
-        return Decision(action="BUY", confidence=conf, reason="trend_up+pullback+bos")
+        if trend_up and pull_long and bos_up:
+            conf = _clamp01(0.25 + dist_score * 0.25 + bos_score + candle_score)
+            return Decision(action="BUY", confidence=conf, reason="trend_up+pullback+bos")
 
-    if trend_down and pull_short and bos_down:
-        conf = max(0.0, min(1.0, 0.25 + dist_score * 0.25 + bos_score + candle_score))
-        return Decision(action="SELL", confidence=conf, reason="trend_down+pullback+bos")
+        if trend_down and pull_short and bos_down:
+            conf = _clamp01(0.25 + dist_score * 0.25 + bos_score + candle_score)
+            return Decision(action="SELL", confidence=conf, reason="trend_down+pullback+bos")
 
-    return Decision(action="NONE", confidence=0.0, reason="no_setup")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    if kind == "wyckoff_spring":
+        if not (math.isfinite(range_low) and tick_size > 0):
+            return Decision(action="NONE", confidence=0.0, reason="no_range")
+        buf = float(spec.setup.buffer_ticks) * float(tick_size)
+        swept = low < (range_low - buf)
+        reclaimed = close > range_low
+        if swept and reclaimed and (math.isfinite(rvol20) and float(rvol20) >= float(spec.setup.min_rvol20)):
+            rv_score = _clamp01((float(rvol20) - float(spec.setup.min_rvol20)) / 1.5)
+            sweep_ticks = (range_low - low) / tick_size
+            sweep_score = _clamp01(sweep_ticks / max(1.0, float(spec.setup.buffer_ticks) * 4.0))
+            conf = _clamp01(0.45 + 0.25 * rv_score + 0.20 * sweep_score)
+            return Decision(action="BUY", confidence=conf, reason="spring_sweep+reclaim")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    if kind == "wyckoff_upthrust":
+        if not (math.isfinite(range_high) and tick_size > 0):
+            return Decision(action="NONE", confidence=0.0, reason="no_range")
+        buf = float(spec.setup.buffer_ticks) * float(tick_size)
+        swept = high > (range_high + buf)
+        rejected = close < range_high
+        if swept and rejected and (math.isfinite(rvol20) and float(rvol20) >= float(spec.setup.min_rvol20)):
+            rv_score = _clamp01((float(rvol20) - float(spec.setup.min_rvol20)) / 1.5)
+            sweep_ticks = (high - range_high) / tick_size
+            sweep_score = _clamp01(sweep_ticks / max(1.0, float(spec.setup.buffer_ticks) * 4.0))
+            conf = _clamp01(0.45 + 0.25 * rv_score + 0.20 * sweep_score)
+            return Decision(action="SELL", confidence=conf, reason="upthrust_sweep+reject")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    if kind == "wyckoff_sos_lps":
+        if not (math.isfinite(range_high) and tick_size > 0):
+            return Decision(action="NONE", confidence=0.0, reason="no_range")
+        exp = int(setup_mem.get("sos_expire_i") or -1)
+        if bar_index > exp:
+            setup_mem.pop("sos_expire_i", None)
+            exp = -1
+
+        brk_buf = float(spec.setup.breakout_buffer_ticks) * float(tick_size)
+        pb_buf = float(spec.setup.pullback_buffer_ticks) * float(tick_size)
+
+        breakout = close > (range_high + brk_buf) and (math.isfinite(rvol20) and float(rvol20) >= float(spec.setup.min_rvol20_breakout))
+        if breakout:
+            setup_mem["sos_expire_i"] = int(bar_index) + int(spec.setup.memory_bars)
+            exp = int(setup_mem["sos_expire_i"])
+
+        in_window = exp >= bar_index
+        pullback_hold = low <= (range_high + pb_buf) and close >= (range_high - pb_buf)
+        if in_window and pullback_hold:
+            rv_score = _clamp01((float(rvol20) - 1.0) / 1.5) if math.isfinite(rvol20) else 0.0
+            conf = _clamp01(0.40 + 0.20 * rv_score + 0.15)
+            return Decision(action="BUY", confidence=conf, reason="sos_then_lps")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    if kind == "wyckoff_sow_lpsy":
+        if not (math.isfinite(range_low) and tick_size > 0):
+            return Decision(action="NONE", confidence=0.0, reason="no_range")
+        exp = int(setup_mem.get("sow_expire_i") or -1)
+        if bar_index > exp:
+            setup_mem.pop("sow_expire_i", None)
+            exp = -1
+
+        brk_buf = float(spec.setup.breakout_buffer_ticks) * float(tick_size)
+        pb_buf = float(spec.setup.pullback_buffer_ticks) * float(tick_size)
+
+        breakdown = close < (range_low - brk_buf) and (math.isfinite(rvol20) and float(rvol20) >= float(spec.setup.min_rvol20_breakout))
+        if breakdown:
+            setup_mem["sow_expire_i"] = int(bar_index) + int(spec.setup.memory_bars)
+            exp = int(setup_mem["sow_expire_i"])
+
+        in_window = exp >= bar_index
+        pullback_fail = high >= (range_low - pb_buf) and close <= (range_low + pb_buf)
+        if in_window and pullback_fail:
+            rv_score = _clamp01((float(rvol20) - 1.0) / 1.5) if math.isfinite(rvol20) else 0.0
+            conf = _clamp01(0.40 + 0.20 * rv_score + 0.15)
+            return Decision(action="SELL", confidence=conf, reason="sow_then_lpsy")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    if kind in {"vsa_selling_climax", "vsa_buying_climax"}:
+        # Deterministic VSA climax proxy: vol_z50 + wide spread + close near one extreme.
+        spread = max(0.0, float(high) - float(low))
+        pos = 0.5 if spread <= 0 else (float(close) - float(low)) / spread  # 0=low, 1=high
+        if not (math.isfinite(vol_z50) and math.isfinite(spread_ticks)):
+            return Decision(action="NONE", confidence=0.0, reason="no_vsa")
+
+        if kind == "vsa_selling_climax":
+            ok = float(vol_z50) >= float(spec.setup.min_vol_z50) and float(spread_ticks) >= float(spec.setup.min_spread_ticks) and pos <= float(spec.setup.close_pos_max)
+            if ok:
+                vol_score = _clamp01((float(vol_z50) - float(spec.setup.min_vol_z50)) / 2.0)
+                conf = _clamp01(0.55 + 0.25 * vol_score)
+                return Decision(action="BUY", confidence=conf, reason="vsa_selling_climax")
+            return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+        ok = float(vol_z50) >= float(spec.setup.min_vol_z50) and float(spread_ticks) >= float(spec.setup.min_spread_ticks) and pos >= float(spec.setup.close_pos_min)
+        if ok:
+            vol_score = _clamp01((float(vol_z50) - float(spec.setup.min_vol_z50)) / 2.0)
+            conf = _clamp01(0.55 + 0.25 * vol_score)
+            return Decision(action="SELL", confidence=conf, reason="vsa_buying_climax")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    if kind == "wyckoff_range_reversion":
+        if not (math.isfinite(range_high) and math.isfinite(range_low) and tick_size > 0):
+            return Decision(action="NONE", confidence=0.0, reason="no_range")
+        band = float(spec.setup.entry_band_ticks) * float(tick_size)
+        if band <= 0:
+            return Decision(action="NONE", confidence=0.0, reason="no_band")
+
+        do_buy = spec.setup.side in {"BOTH", "BUY_LOW"}
+        do_sell = spec.setup.side in {"BOTH", "SELL_HIGH"}
+        if do_buy and close <= (range_low + band):
+            dist = (close - range_low) / band
+            conf = _clamp01(0.35 + 0.35 * (1.0 - _clamp01(dist)))
+            return Decision(action="BUY", confidence=conf, reason="range_buy_low")
+        if do_sell and close >= (range_high - band):
+            dist = (range_high - close) / band
+            conf = _clamp01(0.35 + 0.35 * (1.0 - _clamp01(dist)))
+            return Decision(action="SELL", confidence=conf, reason="range_sell_high")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    if kind == "opening_range_breakout":
+        if not or_complete or not (math.isfinite(or_high) and math.isfinite(or_low) and tick_size > 0):
+            return Decision(action="NONE", confidence=0.0, reason="or_not_ready")
+        buf = float(spec.setup.buffer_ticks) * float(tick_size)
+        if math.isfinite(rvol20) and float(rvol20) < float(spec.setup.min_rvol20):
+            return Decision(action="NONE", confidence=0.0, reason="low_rvol")
+
+        if close > (or_high + buf):
+            rv_score = _clamp01((float(rvol20) - float(spec.setup.min_rvol20)) / 1.5) if math.isfinite(rvol20) else 0.0
+            conf = _clamp01(0.40 + 0.25 * rv_score + 0.10)
+            return Decision(action="BUY", confidence=conf, reason="or_break_up")
+        if close < (or_low - buf):
+            rv_score = _clamp01((float(rvol20) - float(spec.setup.min_rvol20)) / 1.5) if math.isfinite(rvol20) else 0.0
+            conf = _clamp01(0.40 + 0.25 * rv_score + 0.10)
+            return Decision(action="SELL", confidence=conf, reason="or_break_down")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    if kind == "wyckoff_contraction_breakout":
+        if not (math.isfinite(range_high) and math.isfinite(range_low) and tick_size > 0):
+            return Decision(action="NONE", confidence=0.0, reason="no_range")
+        max_atr = float(spec.setup.max_atr_ticks)
+        count = int(setup_mem.get("contract_count") or 0)
+        if atr_ticks <= max_atr:
+            count += 1
+        else:
+            count = 0
+        setup_mem["contract_count"] = count
+
+        if count < int(spec.setup.contraction_bars):
+            return Decision(action="NONE", confidence=0.0, reason="waiting_contraction")
+
+        buf = float(spec.setup.buffer_ticks) * float(tick_size)
+        if math.isfinite(rvol20) and float(rvol20) < float(spec.setup.min_rvol20):
+            return Decision(action="NONE", confidence=0.0, reason="low_rvol")
+
+        if close > (range_high + buf):
+            rv_score = _clamp01((float(rvol20) - float(spec.setup.min_rvol20)) / 1.5) if math.isfinite(rvol20) else 0.0
+            conf = _clamp01(0.42 + 0.25 * rv_score + 0.10)
+            return Decision(action="BUY", confidence=conf, reason="contraction_break_up")
+        if close < (range_low - buf):
+            rv_score = _clamp01((float(rvol20) - float(spec.setup.min_rvol20)) / 1.5) if math.isfinite(rvol20) else 0.0
+            conf = _clamp01(0.42 + 0.25 * rv_score + 0.10)
+            return Decision(action="SELL", confidence=conf, reason="contraction_break_down")
+        return Decision(action="NONE", confidence=0.0, reason="no_setup")
+
+    return Decision(action="NONE", confidence=0.0, reason="unsupported_setup")
 
 
 def run_backtest(
@@ -211,10 +394,32 @@ def run_backtest(
     atr_warm = 0
     prev_close: Optional[float] = None
 
-    # BOS rolling window over closes; keep high/low of previous N bars
+    ema_trend_len = int(getattr(spec.setup, "ema_trend_len", 200))
+    ema_pull_len = int(getattr(spec.setup, "ema_pullback_len", 20))
+
+    # BOS rolling window over highs/lows (trend_pullback_bos)
     hh_window: List[float] = []
     ll_window: List[float] = []
-    bos_n = int(spec.setup.bos_lookback)
+    bos_n = int(getattr(spec.setup, "bos_lookback", 10))
+
+    # Range window (Wyckoff range-based setups)
+    range_n = int(getattr(spec.setup, "range_lookback", 0) or 0)
+    range_h_window: deque[float] = deque(maxlen=max(1, range_n))
+    range_l_window: deque[float] = deque(maxlen=max(1, range_n))
+
+    # Volume windows for RVOL/Zscore (VSA/Wyckoff proxies)
+    vol20: deque[float] = deque(maxlen=20)
+    vol50: deque[float] = deque(maxlen=50)
+    vol20_sum = 0.0
+    vol50_sum = 0.0
+    vol50_sumsq = 0.0
+
+    # Opening range tracking (only used if setup has or_minutes)
+    or_minutes = int(getattr(spec.setup, "or_minutes", 0) or 0)
+    or_high = float("nan")
+    or_low = float("nan")
+    or_complete = False
+    sess_start_local: Optional[datetime] = None
 
     def hard_stop() -> None:
         if spec.risk.max_loss_usd <= 0:
@@ -236,6 +441,52 @@ def run_backtest(
         h = float(b.high or 0.0)
         l = float(b.low or 0.0)
         c = float(b.close or 0.0)
+        v = float(b.volume or 0.0)
+
+        # Range boundaries from prior bars (avoid lookahead).
+        range_high = float("nan")
+        range_low = float("nan")
+        if range_n > 0 and len(range_h_window) >= range_n and len(range_l_window) >= range_n:
+            range_high = max(range_h_window) if range_h_window else float("nan")
+            range_low = min(range_l_window) if range_l_window else float("nan")
+
+        # Opening range update (session-scoped)
+        if or_minutes > 0 and sess_start_local is not None and not or_complete:
+            try:
+                mins = int((ts.astimezone(tz) - sess_start_local).total_seconds() // 60)
+            except Exception:
+                mins = 0
+            if mins < or_minutes:
+                or_high = h if not math.isfinite(or_high) else max(or_high, h)
+                or_low = l if not math.isfinite(or_low) else min(or_low, l)
+            else:
+                or_complete = bool(math.isfinite(or_high) and math.isfinite(or_low))
+
+        # Volume features (RVOL20 / VolZ50) computed including current bar (deterministic at close).
+        if len(vol20) == vol20.maxlen:
+            vol20_sum -= float(vol20[0])
+        vol20.append(v)
+        vol20_sum += v
+        rvol20 = float("nan")
+        if len(vol20) >= 20:
+            mu20 = vol20_sum / float(len(vol20))
+            rvol20 = float(v / mu20) if mu20 > 0 else float("nan")
+
+        if len(vol50) == vol50.maxlen:
+            old = float(vol50[0])
+            vol50_sum -= old
+            vol50_sumsq -= old * old
+        vol50.append(v)
+        vol50_sum += v
+        vol50_sumsq += v * v
+        vol_z50 = float("nan")
+        if len(vol50) >= 50:
+            mu50 = vol50_sum / float(len(vol50))
+            var50 = max(0.0, (vol50_sumsq / float(len(vol50))) - (mu50 * mu50))
+            sd50 = math.sqrt(var50)
+            vol_z50 = float((v - mu50) / sd50) if sd50 > 0 else float("nan")
+
+        spread_ticks = ((h - l) / tick) if tick > 0 else float("nan")
 
         # Update session
         sess_key = _session_id(ts, tz=tz, start_hhmm=spec.session.start_hhmm)
@@ -243,6 +494,20 @@ def run_backtest(
             state.session_key = sess_key
             state.trades_this_session = 0
             state.cooldown_left = 0
+
+            # Reset session-scoped opening range tracking.
+            or_high = float("nan")
+            or_low = float("nan")
+            or_complete = False
+            sess_start_local = None
+            if or_minutes > 0:
+                try:
+                    day_str = str(sess_key).split("@", 1)[0]
+                    day_dt = datetime.fromisoformat(day_str)
+                    start = int(spec.session.start_hhmm)
+                    sess_start_local = datetime(day_dt.year, day_dt.month, day_dt.day, start // 100, start % 100, tzinfo=tz)
+                except Exception:
+                    sess_start_local = None
 
         # decrement cooldown once per bar
         if state.cooldown_left > 0:
@@ -347,8 +612,8 @@ def run_backtest(
             ema_trend_prev = c
         else:
             ema_trend_prev = ema_trend
-            ema_trend = _ema_next(ema_trend, c, int(spec.setup.ema_trend_len))
-            ema_pull = _ema_next(ema_pull, c, int(spec.setup.ema_pullback_len))
+            ema_trend = _ema_next(ema_trend, c, ema_trend_len)
+            ema_pull = _ema_next(ema_pull, c, ema_pull_len)
 
         # BOS windows (exclude current): update after decision stage; so compute using prior window values
         # We'll compute bos_hh/bos_ll from window, and then append current high/low after decision.
@@ -372,10 +637,13 @@ def run_backtest(
                 else:
                     decision = _evaluate_setup(
                         spec=spec,
+                        setup_mem=state.setup_mem,
+                        bar_index=i,
                         close=c,
                         open_=o,
                         high=h,
                         low=l,
+                        volume=v,
                         ema_trend=ema_trend,
                         ema_trend_prev=ema_trend_prev,
                         ema_pull=ema_pull,
@@ -383,6 +651,15 @@ def run_backtest(
                         bos_ll=bos_ll,
                         atr=atr,
                         tick_size=tick,
+                        atr_ticks=atr_ticks,
+                        range_high=range_high,
+                        range_low=range_low,
+                        rvol20=rvol20,
+                        vol_z50=vol_z50,
+                        spread_ticks=spread_ticks,
+                        or_high=or_high,
+                        or_low=or_low,
+                        or_complete=or_complete,
                     )
                     if decision.action == "NONE":
                         pass
@@ -403,6 +680,11 @@ def run_backtest(
             hh_window.pop(0)
         if len(ll_window) > bos_n:
             ll_window.pop(0)
+
+        # Update range windows with current bar after decision (avoid lookahead).
+        if range_n > 0:
+            range_h_window.append(h)
+            range_l_window.append(l)
 
     # Close any open position at last close (EOD) for determinism
     if state.side in {"LONG", "SHORT"} and state.qty > 0 and bars:
@@ -467,4 +749,3 @@ def compute_metrics(*, trades: List[Trade], realized_pnl: float, max_dd: float) 
         "grossProfit": float(gross_profit),
         "grossLoss": float(gross_loss),
     }
-

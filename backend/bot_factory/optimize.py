@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
@@ -146,7 +148,28 @@ def run_optimize(
     ema_pull = 0.0
     hh_window: List[float] = []
     ll_window: List[float] = []
-    bos_n = int(base.setup.bos_lookback)
+
+    ema_trend_len = int(getattr(base.setup, "ema_trend_len", 200))
+    ema_pull_len = int(getattr(base.setup, "ema_pullback_len", 20))
+    bos_n = int(getattr(base.setup, "bos_lookback", 10))
+
+    range_n = int(getattr(base.setup, "range_lookback", 0) or 0)
+    range_h_window: deque[float] = deque(maxlen=max(1, range_n))
+    range_l_window: deque[float] = deque(maxlen=max(1, range_n))
+
+    vol20: deque[float] = deque(maxlen=20)
+    vol50: deque[float] = deque(maxlen=50)
+    vol20_sum = 0.0
+    vol50_sum = 0.0
+    vol50_sumsq = 0.0
+
+    or_minutes = int(getattr(base.setup, "or_minutes", 0) or 0)
+    or_high = float("nan")
+    or_low = float("nan")
+    or_complete = False
+    sess_start_local: datetime | None = None
+
+    setup_mem: Dict[str, Any] = {}
 
     current_session_key = ""
 
@@ -163,6 +186,13 @@ def run_optimize(
         h = float(b.high or 0.0)
         l = float(b.low or 0.0)
         c = float(b.close or 0.0)
+        v = float(b.volume or 0.0)
+
+        range_high = float("nan")
+        range_low = float("nan")
+        if range_n > 0 and len(range_h_window) >= range_n and len(range_l_window) >= range_n:
+            range_high = max(range_h_window) if range_h_window else float("nan")
+            range_low = min(range_l_window) if range_l_window else float("nan")
 
         sess_key = eng._session_id(ts, tz=tz, start_hhmm=base.session.start_hhmm)
         if sess_key != current_session_key:
@@ -171,6 +201,56 @@ def run_optimize(
                 st.session_key = sess_key
                 st.trades_this_session = 0
                 st.cooldown_left = 0
+
+            or_high = float("nan")
+            or_low = float("nan")
+            or_complete = False
+            sess_start_local = None
+            if or_minutes > 0:
+                try:
+                    day_str = str(sess_key).split("@", 1)[0]
+                    day_dt = datetime.fromisoformat(day_str)
+                    start = int(base.session.start_hhmm)
+                    sess_start_local = datetime(day_dt.year, day_dt.month, day_dt.day, start // 100, start % 100, tzinfo=tz)
+                except Exception:
+                    sess_start_local = None
+
+        if or_minutes > 0 and sess_start_local is not None and not or_complete:
+            try:
+                mins = int((ts.astimezone(tz) - sess_start_local).total_seconds() // 60)
+            except Exception:
+                mins = 0
+            if mins < or_minutes:
+                or_high = h if not math.isfinite(or_high) else max(or_high, h)
+                or_low = l if not math.isfinite(or_low) else min(or_low, l)
+            else:
+                or_complete = bool(math.isfinite(or_high) and math.isfinite(or_low))
+
+        # Volume features including current bar.
+        if len(vol20) == vol20.maxlen:
+            vol20_sum -= float(vol20[0])
+        vol20.append(v)
+        vol20_sum += v
+        rvol20 = float("nan")
+        if len(vol20) >= 20:
+            mu20 = vol20_sum / float(len(vol20))
+            rvol20 = float(v / mu20) if mu20 > 0 else float("nan")
+
+        if len(vol50) == vol50.maxlen:
+            old = float(vol50[0])
+            vol50_sum -= old
+            vol50_sumsq -= old * old
+        vol50.append(v)
+        vol50_sum += v
+        vol50_sumsq += v * v
+        vol_z50 = float("nan")
+        if len(vol50) >= 50:
+            mu50 = vol50_sum / float(len(vol50))
+            var50 = max(0.0, (vol50_sumsq / float(len(vol50))) - (mu50 * mu50))
+            sd50 = math.sqrt(var50)
+            vol_z50 = float((v - mu50) / sd50) if sd50 > 0 else float("nan")
+
+        spread_ticks = ((h - l) / tick) if tick > 0 else float("nan")
 
         # Cooldown decrement (once per bar)
         for st in bot_states:
@@ -280,19 +360,23 @@ def run_optimize(
             ema_trend_prev = c
         else:
             ema_trend_prev = ema_trend
-            ema_trend = eng._ema_next(ema_trend, c, int(base.setup.ema_trend_len))
-            ema_pull = eng._ema_next(ema_pull, c, int(base.setup.ema_pullback_len))
+            ema_trend = eng._ema_next(ema_trend, c, ema_trend_len)
+            ema_pull = eng._ema_next(ema_pull, c, ema_pull_len)
 
         bos_hh = max(hh_window) if hh_window else h
         bos_ll = min(ll_window) if ll_window else l
 
         # Decision (shared action + confidence)
+        atr_ticks = (atr / tick) if tick > 0 else 0.0
         decision = eng._evaluate_setup(
             spec=base,
+            setup_mem=setup_mem,
+            bar_index=i,
             close=c,
             open_=o,
             high=h,
             low=l,
+            volume=v,
             ema_trend=ema_trend,
             ema_trend_prev=ema_trend_prev,
             ema_pull=ema_pull,
@@ -300,9 +384,17 @@ def run_optimize(
             bos_ll=bos_ll,
             atr=atr,
             tick_size=tick,
+            atr_ticks=atr_ticks,
+            range_high=range_high,
+            range_low=range_low,
+            rvol20=rvol20,
+            vol_z50=vol_z50,
+            spread_ticks=spread_ticks,
+            or_high=or_high,
+            or_low=or_low,
+            or_complete=or_complete,
         )
         in_session = eng._in_session_window(ts, base)
-        atr_ticks = (atr / tick) if tick > 0 else 0.0
 
         for st, spec in zip(bot_states, variants, strict=False):
             if st.side != "FLAT" or st.pending_action != "NONE":
@@ -343,6 +435,10 @@ def run_optimize(
             hh_window.pop(0)
         if len(ll_window) > bos_n:
             ll_window.pop(0)
+
+        if range_n > 0:
+            range_h_window.append(h)
+            range_l_window.append(l)
 
     # EOD close for determinism (per bot)
     if bars:
