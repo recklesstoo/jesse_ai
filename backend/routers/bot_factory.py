@@ -5,6 +5,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -13,6 +14,7 @@ from backend.bot_factory.engine import run_backtest
 from backend.bot_factory.optimize import generate_variants, run_optimize
 from backend.contracts.bot_spec_v1 import BotSpecV1
 from backend.database import SessionLocal, get_db
+from backend.market.metrics import instrument_spec
 from backend.models import BacktestRun, BotSpec, DataBar, OptimizeRun
 
 
@@ -79,6 +81,252 @@ class OptimizeRunRequest(BaseModel):
     startDay: str
     endDay: str
     grid: Dict[str, List[Any]] = Field(default_factory=dict)
+
+
+class InstructBotsRequest(BaseModel):
+    symbol: str = Field(default="MNQ")
+    timeframe: str = Field(default="1m", description="1m|5m")
+    startDay: str
+    endDay: str
+    botIdPrefix: str = Field(default="ai-wyckoff")
+    maxBots: int = Field(default=8, ge=1, le=20)
+    create: bool = True
+    backtest: bool = True
+
+
+def _clamp_int(v: float, lo: int, hi: int) -> int:
+    return int(max(lo, min(hi, int(round(float(v))))))
+
+
+def _market_stats(*, bars: List[DataBar], tick: float) -> Dict[str, Any]:
+    closes = np.array([float(b.close or 0.0) for b in bars], dtype=float)
+    highs = np.array([float(b.high or 0.0) for b in bars], dtype=float)
+    lows = np.array([float(b.low or 0.0) for b in bars], dtype=float)
+    vols = np.array([float(b.volume or 0.0) for b in bars], dtype=float)
+
+    # True range ticks (uses previous close)
+    prev_close = np.roll(closes, 1)
+    prev_close[0] = closes[0] if len(closes) else 0.0
+    tr = np.maximum(highs - lows, np.maximum(np.abs(highs - prev_close), np.abs(lows - prev_close)))
+    tr_ticks = (tr / tick) if tick > 0 else np.zeros_like(tr)
+
+    atr_median = float(np.median(tr_ticks)) if len(tr_ticks) else 0.0
+    atr_p90 = float(np.percentile(tr_ticks, 90)) if len(tr_ticks) else 0.0
+
+    vol_mu = float(np.mean(vols)) if len(vols) else 0.0
+    vol_sd = float(np.std(vols)) if len(vols) else 0.0
+    vol_cv = float(vol_sd / vol_mu) if vol_mu > 0 else 0.0
+
+    # Trend score: linear regression r2 + slope normalized by ATR (very rough proxy).
+    trend_r2 = 0.0
+    trend_slope_atr = 0.0
+    if len(closes) >= 60:
+        n = min(300, len(closes))
+        y = closes[-n:]
+        x = np.arange(n, dtype=float)
+        x_mu = float(np.mean(x))
+        y_mu = float(np.mean(y))
+        cov = float(np.sum((x - x_mu) * (y - y_mu)))
+        var = float(np.sum((x - x_mu) ** 2))
+        b = 0.0 if var <= 0 else cov / var
+        a = y_mu - b * x_mu
+        y_hat = a + b * x
+        ss_res = float(np.sum((y - y_hat) ** 2))
+        ss_tot = float(np.sum((y - y_mu) ** 2))
+        trend_r2 = 0.0 if ss_tot <= 0 else max(0.0, min(1.0, 1.0 - ss_res / ss_tot))
+        atr_norm = float(np.median(tr_ticks[-n:])) if len(tr_ticks) >= n else atr_median
+        trend_slope_atr = float((b / tick) / max(1.0, atr_norm)) if tick > 0 else 0.0
+
+    return {
+        "bars": int(len(bars)),
+        "atr_ticks_median": atr_median,
+        "atr_ticks_p90": atr_p90,
+        "vol_mu": vol_mu,
+        "vol_cv": vol_cv,
+        "trend_r2": trend_r2,
+        "trend_slope_atr": trend_slope_atr,
+    }
+
+
+def _suggest_specs(*, req: InstructBotsRequest, stats: Dict[str, Any]) -> List[BotSpecV1]:
+    tick = instrument_spec(req.symbol).tick_size
+    atr_med = float(stats.get("atr_ticks_median") or 0.0)
+    atr_p90 = float(stats.get("atr_ticks_p90") or 0.0)
+    vol_cv = float(stats.get("vol_cv") or 0.0)
+    trend_r2 = float(stats.get("trend_r2") or 0.0)
+    trend_slope_atr = float(stats.get("trend_slope_atr") or 0.0)
+
+    # Heuristic knobs derived from market stats (kept conservative).
+    buffer_ticks = _clamp_int(max(1.0, atr_med * 0.15), 1, 4)
+    entry_band_ticks = _clamp_int(max(2.0, atr_med * 0.4), 2, 10)
+    range_lookback = _clamp_int(120 + (atr_p90 * 2.0), 120, 400)
+    min_rvol = float(max(1.05, min(1.25, 1.05 + vol_cv * 0.15)))
+
+    # Choose a mix of setups. If trend is strong, include more trend/breakout; else more range/mean-reversion.
+    is_trending = (trend_r2 >= 0.20 and abs(trend_slope_atr) >= 0.03)
+
+    setups: List[Dict[str, Any]] = []
+    if is_trending:
+        setups.extend(
+            [
+                {"kind": "trend_pullback_bos", "ema_trend_len": 200, "ema_pullback_len": 20, "bos_lookback": 10},
+                {"kind": "opening_range_breakout", "or_minutes": 15, "buffer_ticks": buffer_ticks, "min_rvol20": min_rvol},
+                {
+                    "kind": "wyckoff_contraction_breakout",
+                    "range_lookback": range_lookback,
+                    "contraction_bars": 25,
+                    "max_atr_ticks": _clamp_int(max(6.0, atr_med * 0.9), 4, 14),
+                    "buffer_ticks": buffer_ticks,
+                    "min_rvol20": min_rvol,
+                },
+            ]
+        )
+    else:
+        setups.extend(
+            [
+                {"kind": "wyckoff_range_reversion", "range_lookback": range_lookback, "entry_band_ticks": entry_band_ticks, "side": "BOTH"},
+                {"kind": "wyckoff_spring", "range_lookback": range_lookback, "buffer_ticks": buffer_ticks, "min_rvol20": max(1.10, min_rvol)},
+                {"kind": "wyckoff_upthrust", "range_lookback": range_lookback, "buffer_ticks": buffer_ticks, "min_rvol20": max(1.10, min_rvol)},
+            ]
+        )
+
+    # Always include core Wyckoff event specialists (works in both regimes).
+    setups.extend(
+        [
+            {
+                "kind": "wyckoff_sos_lps",
+                "range_lookback": range_lookback,
+                "breakout_buffer_ticks": buffer_ticks,
+                "pullback_buffer_ticks": buffer_ticks,
+                "min_rvol20_breakout": max(1.15, min_rvol),
+                "memory_bars": 120,
+            },
+            {
+                "kind": "wyckoff_sow_lpsy",
+                "range_lookback": range_lookback,
+                "breakout_buffer_ticks": buffer_ticks,
+                "pullback_buffer_ticks": buffer_ticks,
+                "min_rvol20_breakout": max(1.15, min_rvol),
+                "memory_bars": 120,
+            },
+            {"kind": "vsa_selling_climax", "min_vol_z50": 2.0, "min_spread_ticks": _clamp_int(max(8.0, atr_med * 1.1), 6, 18), "close_pos_max": 0.35},
+            {"kind": "vsa_buying_climax", "min_vol_z50": 2.0, "min_spread_ticks": _clamp_int(max(8.0, atr_med * 1.1), 6, 18), "close_pos_min": 0.65},
+        ]
+    )
+
+    # Ensure we can reach maxBots by adding deterministic fallbacks (no duplicates by kind).
+    wanted = int(req.maxBots)
+    existing_kinds = {str(s.get("kind")) for s in setups if isinstance(s, dict) and s.get("kind")}
+    fallbacks: List[Dict[str, Any]] = [
+        {"kind": "opening_range_breakout", "or_minutes": 15, "buffer_ticks": buffer_ticks, "min_rvol20": min_rvol},
+        {"kind": "wyckoff_range_reversion", "range_lookback": range_lookback, "entry_band_ticks": entry_band_ticks, "side": "BOTH"},
+        {"kind": "trend_pullback_bos", "ema_trend_len": 200, "ema_pullback_len": 20, "bos_lookback": 10},
+        {"kind": "wyckoff_spring", "range_lookback": range_lookback, "buffer_ticks": buffer_ticks, "min_rvol20": max(1.10, min_rvol)},
+        {"kind": "wyckoff_upthrust", "range_lookback": range_lookback, "buffer_ticks": buffer_ticks, "min_rvol20": max(1.10, min_rvol)},
+    ]
+    for f in fallbacks:
+        if len(setups) >= wanted:
+            break
+        k = str(f.get("kind"))
+        if k and k not in existing_kinds:
+            setups.append(f)
+            existing_kinds.add(k)
+
+    setups = setups[:wanted]
+
+    base: Dict[str, Any] = {
+        "version": "bot-spec.v1",
+        "symbol": req.symbol.upper().strip(),
+        "timeframe": req.timeframe.strip().lower(),
+        "session": {"mode": "BOTH", "tz": "America/New_York", "start_hhmm": 930, "end_hhmm": 1600},
+        "risk": {
+            "qty": 1,
+            "stop_loss_ticks": _clamp_int(max(8.0, atr_med * 1.1), 6, 24),
+            "take_profit_ticks": _clamp_int(max(10.0, atr_med * 1.4), 8, 36),
+            "max_loss_usd": 1200.0,
+        },
+        "gates": {"min_confidence": 0.10, "min_atr_ticks": _clamp_int(max(2.0, atr_med * 0.5), 0, 20), "cooldown_bars": 2, "max_trades_per_session": 20},
+        "tags": ["auto", "wyckoff", "data_driven", "v1"],
+    }
+
+    out: List[BotSpecV1] = []
+    for idx, setup in enumerate(setups, start=1):
+        spec = dict(base)
+        spec["botId"] = f"{req.botIdPrefix}-{idx:02d}"
+        spec["name"] = f"AutoWyckoff {idx:02d} ({setup.get('kind')})"
+        spec["setup"] = setup
+        out.append(BotSpecV1.model_validate(spec))
+    return out
+
+
+@router.post("/api/v1/bots/instruct")
+async def instruct_bots(payload: InstructBotsRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    symbol = (payload.symbol or "MNQ").upper().strip()
+    timeframe = str(payload.timeframe or "1m").strip().lower()
+    if timeframe not in {"1m", "5m"}:
+        raise HTTPException(status_code=400, detail="timeframe must be 1m or 5m")
+
+    start_utc, end_utc = _parse_range(payload.model_dump())
+    bars = _load_bars(db, symbol=symbol, timeframe=timeframe, start_utc=start_utc, end_utc=end_utc)
+    if not bars:
+        raise HTTPException(status_code=400, detail="no_data_bars")
+
+    tick = float(instrument_spec(symbol).tick_size)
+    stats = _market_stats(bars=bars, tick=tick)
+    specs = _suggest_specs(req=payload, stats=stats)
+
+    results: List[Dict[str, Any]] = []
+    for spec in specs:
+        if payload.create:
+            row = db.query(BotSpec).filter(BotSpec.bot_id == spec.bot_id).first()
+            if row is None:
+                row = BotSpec(bot_id=spec.bot_id, spec_version=spec.version, spec=spec.dump_canonical())
+                db.add(row)
+            else:
+                row.spec_version = spec.version
+                row.spec = spec.dump_canonical()
+        metrics = None
+        if payload.backtest:
+            m, _trades = run_backtest(spec=spec, bars=bars)
+            metrics = m
+        results.append({"botId": spec.bot_id, "spec": spec.dump_canonical(), "metrics": metrics})
+
+    if payload.create:
+        db.commit()
+
+    # Sort best-first when we have metrics.
+    def _score(item: Dict[str, Any]) -> float:
+        m = item.get("metrics") or {}
+        return float(m.get("netPnL") or 0.0)
+
+    if payload.backtest:
+        results.sort(key=_score, reverse=True)
+
+    return {"ok": True, "symbol": symbol, "timeframe": timeframe, "range": {"startDay": payload.startDay, "endDay": payload.endDay}, "stats": stats, "bots": results, "ts_utc": _utc_iso()}
+
+
+@router.get("/api/v1/bots/specs")
+async def list_bots(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    rows = db.query(BotSpec).order_by(BotSpec.updated_at_utc.desc()).all()
+    bots: List[Dict[str, Any]] = []
+    for r in rows:
+        spec = r.spec or {}
+        setup = spec.get("setup") if isinstance(spec, dict) else {}
+        kind = setup.get("kind") if isinstance(setup, dict) else None
+        bots.append(
+            {
+                "botId": r.bot_id,
+                "spec_version": r.spec_version,
+                "name": spec.get("name") if isinstance(spec, dict) else None,
+                "symbol": spec.get("symbol") if isinstance(spec, dict) else None,
+                "timeframe": spec.get("timeframe") if isinstance(spec, dict) else None,
+                "setup_kind": kind,
+                "tags": spec.get("tags") if isinstance(spec, dict) else None,
+                "updated_at_utc": r.updated_at_utc.isoformat().replace("+00:00", "Z") if r.updated_at_utc else None,
+                "created_at_utc": r.created_at_utc.isoformat().replace("+00:00", "Z") if r.created_at_utc else None,
+            }
+        )
+    return {"ok": True, "count": len(bots), "bots": bots, "ts_utc": _utc_iso()}
 
 
 @router.post("/api/v1/bots")

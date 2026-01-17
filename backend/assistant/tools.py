@@ -61,8 +61,8 @@ def tool_list_bots(_: Dict[str, Any]) -> ToolResult:
     return ToolResult(
         name="tool_list_bots",
         ok=True,
-        data=_call_get("/api/v1/bots"),
-        citations=[{"type": "endpoint", "path": "/api/v1/bots"}],
+        data=_call_get("/api/v1/bots/specs"),
+        citations=[{"type": "endpoint", "path": "/api/v1/bots/specs"}],
     )
 
 
@@ -197,6 +197,26 @@ def tool_get_perf_summary(params: Dict[str, Any]) -> ToolResult:
         ok=bool(data.get("ok")),
         data=data,
         citations=[{"type": "endpoint", "path": "/api/v1/perf/summary", "params": {"botId": bot_id}}],
+    )
+
+
+def tool_instruct_bots(params: Dict[str, Any]) -> ToolResult:
+    body: Dict[str, Any] = {
+        "symbol": params.get("symbol") or "MNQ",
+        "timeframe": params.get("timeframe") or "1m",
+        "startDay": params.get("startDay") or params.get("start_day"),
+        "endDay": params.get("endDay") or params.get("end_day"),
+        "botIdPrefix": params.get("botIdPrefix") or params.get("bot_id_prefix") or "ai-wyckoff",
+        "maxBots": int(params.get("maxBots") or params.get("max_bots") or 8),
+        "create": bool(params.get("create", True)),
+        "backtest": bool(params.get("backtest", True)),
+    }
+    data = _call_post("/api/v1/bots/instruct", json_body=body)
+    return ToolResult(
+        name="tool_instruct_bots",
+        ok=bool(data.get("ok")),
+        data=data,
+        citations=[{"type": "endpoint", "path": "/api/v1/bots/instruct"}],
     )
 
 def tool_get_status(params: Dict[str, Any]) -> ToolResult:

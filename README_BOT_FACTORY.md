@@ -67,6 +67,27 @@ Offline backtest (runs locally against `jesse_ai.db`, no running backend require
 python scripts/offline_backtest_wyckoff_8_bots.py --symbol MNQ --timeframe 1m --start-day 2026-01-02 --end-day 2026-01-02
 ```
 
+## 8) Data-driven bot instruction (auto Wyckoff)
+Generate/update bots from collected `data_bars` statistics and (optionally) backtest them in one call:
+```powershell
+curl -X POST http://127.0.0.1:8000/api/v1/bots/instruct `
+  -H "Content-Type: application/json" `
+  -d '{
+    "symbol":"MNQ",
+    "timeframe":"1m",
+    "startDay":"2026-01-02",
+    "endDay":"2026-01-02",
+    "botIdPrefix":"ai-wyckoff",
+    "maxBots":8,
+    "create":true,
+    "backtest":true
+  }'
+```
+Then list bots (real DB inventory):
+```powershell
+curl http://127.0.0.1:8000/api/v1/bots/specs
+```
+
 ## 2) Run deterministic backtest
 ```powershell
 $run = (curl -s -X POST http://127.0.0.1:8000/api/v1/backtest/run `

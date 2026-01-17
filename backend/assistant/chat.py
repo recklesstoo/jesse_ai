@@ -16,11 +16,13 @@ from backend.assistant.tools import (
     tool_get_backtest_results,
     tool_get_commands_log,
     tool_get_data_summary,
+    tool_instruct_bots,
     tool_get_market_metrics,
     tool_get_monitor_status,
     tool_get_optimize_results,
     tool_get_perf_summary,
     tool_get_state,
+    tool_list_bots,
     tool_run_backtest,
     tool_run_optimize,
     tool_swarm_rank,
@@ -179,10 +181,12 @@ def _system_prompt() -> str:
 
 def _tool_registry() -> Dict[str, ToolFn]:
     return {
+        "tool_list_bots": tool_list_bots,
         "tool_get_state": tool_get_state,
         "tool_get_monitor_status": tool_get_monitor_status,
         "tool_get_commands_log": tool_get_commands_log,
         "tool_get_data_summary": tool_get_data_summary,
+        "tool_instruct_bots": tool_instruct_bots,
         "tool_swarm_rank": tool_swarm_rank,
         "tool_get_market_metrics": tool_get_market_metrics,
         "tool_create_bot": tool_create_bot,
@@ -349,6 +353,92 @@ def _tool_schemas() -> List[Dict[str, Any]]:
                 "name": "tool_get_perf_summary",
                 "description": "Fetch latest performance summary for a botId.",
                 "parameters": {"type": "object", "properties": {"botId": {"type": "string"}}, "required": ["botId"]},
+            },
+        },
+    ]
+
+
+def _tool_schemas_readonly() -> List[Dict[str, Any]]:
+    # Tools that are safe even when opsMode is false.
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_list_bots",
+                "description": "List all bots stored in bot_specs (read-only).",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_get_data_summary",
+                "description": "Fetch data/DB summary (read-only). Can include per-day items.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "botId": {"type": "string"},
+                        "symbol": {"type": "string"},
+                        "timeframe": {"type": "string"},
+                        "includeDays": {"type": "boolean"},
+                        "day": {"type": "string", "description": "YYYY-MM-DD"},
+                        "source": {"type": "string"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_get_market_metrics",
+                "description": "Fetch deterministic market metrics computed from LIVE_WS bars (read-only).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "timeframe": {"type": "string", "description": "1m|5m"},
+                        "lookback": {"type": "integer", "minimum": 10, "maximum": 2000},
+                        "mode": {"type": "string", "description": "summary|raw"},
+                    },
+                    "required": ["symbol", "timeframe"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_swarm_rank",
+                "description": "Fetch swarm rank (read-only).",
+                "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50}}},
+            },
+        },
+    ]
+
+
+def _tool_schemas_ops() -> List[Dict[str, Any]]:
+    # Ops schemas include read-only + research actions (no live execution).
+    return [
+        *_tool_schemas_readonly(),
+        *_tool_schemas(),
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_instruct_bots",
+                "description": "Generate/update bots from collected market data and optionally backtest them.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "timeframe": {"type": "string", "description": "1m|5m"},
+                        "startDay": {"type": "string", "description": "YYYY-MM-DD"},
+                        "endDay": {"type": "string", "description": "YYYY-MM-DD"},
+                        "botIdPrefix": {"type": "string"},
+                        "maxBots": {"type": "integer", "minimum": 1, "maximum": 20},
+                        "create": {"type": "boolean"},
+                        "backtest": {"type": "boolean"},
+                    },
+                    "required": ["symbol", "timeframe", "startDay", "endDay"],
+                },
             },
         },
     ]
@@ -566,7 +656,7 @@ class OpenAIAssistant:
         ]
         messages.extend(turns[-30:])
 
-        tools_schema = _tool_schemas() if ops_mode else []
+        tools_schema = _tool_schemas_ops() if ops_mode else _tool_schemas_readonly()
 
         def run_tool(name: str, params: Dict[str, Any]) -> ToolResult:
             fn = self.tools.get(name)
