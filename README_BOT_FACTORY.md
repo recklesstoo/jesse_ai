@@ -51,6 +51,22 @@ This will create/update 10 bots (different Wyckoff/VSA templates) and kick off d
 ./scripts/train_wyckoff_10_bots.ps1 -ApiBase http://127.0.0.1:8000 -Symbol MNQ
 ```
 
+## 6) Import legacy `data/bars.sqlite3` into `data_bars`
+If you have legacy bars stored in `data/bars.sqlite3` (table `bars`), import them into the Bot Factory `data_bars` table:
+```powershell
+python scripts/import_bars_sqlite_to_data_bars.py --symbol MNQ --timeframe "1 Minute"
+```
+
+## 7) Create + backtest 8 Wyckoff specialist bots
+API-driven backtest (requires backend restarted after code updates):
+```powershell
+./scripts/backtest_wyckoff_8_bots.ps1 -ApiBase http://127.0.0.1:8000 -Symbol MNQ -Timeframe 1m
+```
+Offline backtest (runs locally against `jesse_ai.db`, no running backend required):
+```powershell
+python scripts/offline_backtest_wyckoff_8_bots.py --symbol MNQ --timeframe 1m --start-day 2026-01-02 --end-day 2026-01-02
+```
+
 ## 2) Run deterministic backtest
 ```powershell
 $run = (curl -s -X POST http://127.0.0.1:8000/api/v1/backtest/run `
