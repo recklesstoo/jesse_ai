@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from dotenv import load_dotenv
+from sqlalchemy import event
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -18,9 +19,22 @@ DB_NAME = os.getenv("DB_NAME", "jesse_ai.db")
 DB_PATH = PROJECT_ROOT / DB_NAME
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_PATH}")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False, "timeout": 30})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+if str(DATABASE_URL).lower().startswith("sqlite:"):
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, connection_record) -> None:  # type: ignore[no-redef]
+        try:
+            cur = dbapi_connection.cursor()
+            cur.execute("PRAGMA journal_mode=WAL;")
+            cur.execute("PRAGMA synchronous=NORMAL;")
+            cur.execute("PRAGMA foreign_keys=ON;")
+            cur.execute("PRAGMA busy_timeout=5000;")
+            cur.close()
+        except Exception:
+            pass
 
 
 def get_db():

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 from datetime import datetime, timezone
+from threading import Lock as ThreadLock
+from time import sleep
 from typing import Any, Dict, List, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -20,7 +23,9 @@ from backend.models import (
     DATA_SOURCE_SIMULATED,
 )
 from backend.services.ml_service import ml_service
-from backend.market.buffer import MarketBar, market_buffer
+from backend.market.buffer import MarketBar, market_buffer, normalize_timeframe
+from backend.market.metrics import compute_market_metrics_v1
+from backend.state import compute_feed_status
 from backend.state import (
     AI_MIN_LIVE_BARS,
     _append_log,
@@ -37,6 +42,133 @@ from backend.state import (
 )
 
 MAX_BARS_CACHE = 400
+
+# WS backpressure (BAR_DATA flood protection).
+BAR_RATE_PER_SEC = float(os.getenv("WYCKOFF_WS_BAR_RATE_PER_SEC", "10.0"))
+BAR_BURST = float(os.getenv("WYCKOFF_WS_BAR_BURST", "20.0"))
+_bar_bucket: dict[str, dict[str, Any]] = {}
+
+# Backpressure guards: Ninja/Bridge can flood BAR_DATA (especially in BACKTEST/replay).
+# Keep the WS receive loop fast by throttling expensive work.
+_inference_inflight: set[str] = set()
+_last_bar_update_broadcast_utc: dict[str, datetime] = {}
+_last_market_metrics_broadcast_utc: dict[str, datetime] = {}
+
+# DB persistence batching (prevents task/DB flood from high-frequency BAR_DATA).
+_persist_lock = ThreadLock()
+_pending_bar_persist: dict[str, Dict[str, Any]] = {}
+_bar_persist_tasks: dict[str, asyncio.Task] = {}
+
+
+def _schedule_persist_bar(bot_id: str, payload: Dict[str, Any]) -> bool:
+    """
+    Coalesce BAR_DATA DB writes per bot: keep only the latest pending payload.
+    Returns True if an older pending payload was replaced (dropped).
+    """
+    replaced = False
+    with _persist_lock:
+        replaced = bot_id in _pending_bar_persist
+        _pending_bar_persist[bot_id] = payload
+        t = _bar_persist_tasks.get(bot_id)
+        if t is None or t.done():
+            _bar_persist_tasks[bot_id] = asyncio.create_task(_persist_bar_worker(bot_id))
+    return replaced
+
+
+async def _persist_bar_worker(bot_id: str) -> None:
+    while True:
+        with _persist_lock:
+            payload = _pending_bar_persist.pop(bot_id, None)
+        if payload is None:
+            return
+        try:
+            await asyncio.to_thread(_save_bar_sync, bot_id, payload)
+        except Exception:
+            # Never let DB issues impact WS health.
+            await asyncio.sleep(0)
+
+
+def _allow_bar(bot_id: str, now: datetime) -> bool:
+    """
+    Token bucket per bot for BAR_DATA. If we drop bars, we still keep MONITOR/ACK/TRADE_EVENT flowing.
+    """
+    rate = max(0.1, float(BAR_RATE_PER_SEC))
+    burst = max(1.0, float(BAR_BURST))
+    st = _bar_bucket.get(bot_id)
+    if st is None:
+        st = {"tokens": burst, "last": now, "dropped": 0, "last_drop": None}
+        _bar_bucket[bot_id] = st
+    last = st.get("last") or now
+    if isinstance(last, datetime):
+        elapsed = max(0.0, (now - last).total_seconds())
+    else:
+        elapsed = 0.0
+    st["last"] = now
+    st["tokens"] = min(burst, float(st.get("tokens") or burst) + (elapsed * rate))
+    if float(st["tokens"]) < 1.0:
+        st["dropped"] = int(st.get("dropped") or 0) + 1
+        st["last_drop"] = now
+        return False
+    st["tokens"] = float(st["tokens"]) - 1.0
+    return True
+
+
+def _parse_ws_message(raw: str, path_bot_id: str) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    """
+    Accepts both legacy and Bridge WS v2 envelope fields.
+
+    v2 envelope (top-level): v, source, botId, seq, send_ts_utc
+    legacy: {type: "...", payload: {...}}
+    """
+    message = json.loads(raw)
+    msg_type = (message.get("type") or "").upper()
+    payload = message.get("payload") or {}
+
+    env: dict[str, Any] = {
+        "v": message.get("v"),
+        "source": message.get("source"),
+        "botId": message.get("botId") or message.get("bot_id"),
+        "seq": message.get("seq"),
+        "send_ts_utc": message.get("send_ts_utc"),
+    }
+
+    effective_bot_id = (env.get("botId") or path_bot_id or "").strip() or path_bot_id
+    # Enforce WS path as source-of-truth for routing. Keep mismatch only for diagnostics.
+    if effective_bot_id != path_bot_id:
+        env["botId_mismatch"] = {"path": path_bot_id, "envelope": effective_bot_id}
+        effective_bot_id = path_bot_id
+
+    if isinstance(payload, dict):
+        tf = payload.get("timeframe")
+        if tf is not None:
+            payload["timeframe"] = normalize_timeframe(tf)
+
+    return effective_bot_id, msg_type, payload, env
+
+
+def _commit_with_retry(db, *, label: str, max_attempts: int = 5) -> bool:
+    """
+    SQLite can transiently raise "database is locked" under concurrent WS writes.
+    This is a best-effort retry to avoid noisy errors in logs.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            db.commit()
+            return True
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            if "database is locked" not in msg:
+                break
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            sleep(min(0.25 * attempt, 1.0))
+    if last_exc is not None:
+        print(f"[ws] {label} commit failed: {last_exc}")
+    return False
 
 
 def _open_db():
@@ -75,7 +207,7 @@ def _parse_ts_utc(payload: Dict[str, Any]) -> Optional[datetime]:
     """
     try:
         raw = None
-        for key in ("ts", "time", "timestamp", "bar_ts", "barTs", "t"):
+        for key in ("bar_ts_utc", "barTsUtc", "timestamp", "ts", "time", "bar_ts", "barTs", "t"):
             if key in payload and payload.get(key) is not None:
                 raw = payload.get(key)
                 break
@@ -149,8 +281,18 @@ def _save_bar_sync(bot_id: str, payload: Dict[str, Any]) -> None:
             db.query(Bar).filter(Bar.bot_id == bot_id, ~Bar.id.in_(subq)).delete(
                 synchronize_session=False
             )
-        db.commit()
+        _commit_with_retry(db, label="save_bar")
     except Exception as exc:
+        try:
+            from backend.state import _get_bot_state, _iso, state_lock
+
+            # Best-effort in-memory diagnostics. Never block on the lock here.
+            st = _get_bot_state(bot_id)
+            st["db_bar_errors"] = int(st.get("db_bar_errors") or 0) + 1
+            st["last_db_bar_error_utc"] = _iso(datetime.now(timezone.utc))
+            st["last_db_bar_error"] = str(exc)
+        except Exception:
+            pass
         print(f"[ws] DB save bar error: {exc}")
     finally:
         db.close()
@@ -172,7 +314,7 @@ def _save_signal_sync(bot_id: str, sig_data: Dict[str, Any]) -> None:
             ingested_at_utc=now,
         )
         db.add(signal)
-        db.commit()
+        _commit_with_retry(db, label="save_signal")
     except Exception as exc:
         print(f"[ws] DB save signal error: {exc}")
     finally:
@@ -191,7 +333,7 @@ def _save_monitor_snapshot_sync(bot_id: str, payload: Dict[str, Any]) -> None:
             ingested_at_utc=now,
         )
         db.add(snapshot)
-        db.commit()
+        _commit_with_retry(db, label="save_monitor_snapshot")
     except Exception as exc:
         print(f"[ws] Monitor save error: {exc}")
     finally:
@@ -218,7 +360,7 @@ def _save_trade_event_sync(bot_id: str, payload: Dict[str, Any]) -> None:
             ingested_at_utc=now,
         )
         db.add(trade)
-        db.commit()
+        _commit_with_retry(db, label="save_trade_event")
     except Exception as exc:
         print(f"[ws] Trade event save error: {exc}")
     finally:
@@ -325,25 +467,59 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
                     },
                 )
             try:
-                message = json.loads(raw)
+                effective_bot_id, msg_type, payload, env = _parse_ws_message(raw, bot_id)
             except Exception:
                 continue
-            msg_type = (message.get("type") or "").upper()
-            payload = message.get("payload") or {}
+
+            # Persist envelope metadata for diagnostics.
+            try:
+                async with state_lock:
+                    st = _get_bot_state(effective_bot_id)
+                    if env.get("v") is not None:
+                        st["bridge_v"] = env.get("v")
+                    if env.get("source") is not None:
+                        st["bridge_source"] = env.get("source")
+                    if env.get("seq") is not None:
+                        st["bridge_seq"] = env.get("seq")
+                    if env.get("send_ts_utc") is not None:
+                        st["bridge_send_ts_utc"] = env.get("send_ts_utc")
+                    if env.get("botId_mismatch") is not None:
+                        st["bridge_botId_mismatch"] = env.get("botId_mismatch")
+            except Exception:
+                pass
 
             if msg_type == "BAR_DATA":
-                await _handle_bar_data(bot_id, payload)
+                # Backpressure: drop low-priority bars when client floods.
+                if not _allow_bar(effective_bot_id, now):
+                    async with state_lock:
+                        st = _get_bot_state(effective_bot_id)
+                        st["dropped_bar_count"] = int(st.get("dropped_bar_count") or 0) + 1
+                        st["last_drop_ts_utc"] = _iso(now)
+                        st["drop_reason"] = "bar_rate_limited"
+                    continue
+                await _handle_bar_data(effective_bot_id, payload)
             elif msg_type in ("HEARTBEAT", "PING"):
-                await _handle_heartbeat(bot_id, payload)
+                await _handle_heartbeat(effective_bot_id, payload)
             elif msg_type == "MONITOR":
-                await _handle_monitor(bot_id, payload)
+                await _handle_monitor(effective_bot_id, payload)
             elif msg_type == "TRADE_EVENT":
-                await _handle_trade_event(bot_id, payload)
+                await _handle_trade_event(effective_bot_id, payload)
             elif msg_type == "ACK":
-                await _handle_ack(bot_id, payload)
+                await _handle_ack(effective_bot_id, payload)
 
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        try:
+            client = getattr(websocket, "client", None)
+            code = getattr(exc, "code", None)
+            print(f"[ws] ws_bot disconnect bot_id={bot_id} client={client} code={code}")
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            client = getattr(websocket, "client", None)
+            print(f"[ws] ws_bot error bot_id={bot_id} client={client} err={exc!r}")
+        except Exception:
+            pass
     finally:
         async with state_lock:
             _cleanup_bot(bot_id, websocket)
@@ -358,7 +534,7 @@ async def ws_bot(websocket: WebSocket, bot_id: str) -> None:
 
 async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
     now = datetime.now(timezone.utc)
-    mode_raw = payload.get("mode")
+    mode_raw = payload.get("nt_mode") or payload.get("mode")
     if mode_raw is not None and str(mode_raw).strip().upper().startswith("SIM"):
         asyncio.create_task(
             asyncio.to_thread(
@@ -373,7 +549,12 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
     ts = _parse_ts_utc(payload)
     ts_iso = _iso_z(ts) if ts is not None else None
     symbol = payload.get("symbol") or "MNQ"
-    timeframe = payload.get("timeframe")
+    timeframe = normalize_timeframe(payload.get("timeframe"))
+    # Ensure downstream consumers (DB + caches) see canonical keys.
+    payload["symbol"] = symbol
+    payload["timeframe"] = timeframe
+    if ts_iso and not payload.get("timestamp"):
+        payload["timestamp"] = ts_iso
     o = _safe_float(payload.get("open"))
     h = _safe_float(payload.get("high"))
     l = _safe_float(payload.get("low"))
@@ -395,14 +576,16 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
         print(f"[ws] BAR_DATA missing/invalid timestamp; bot_id={bot_id} keys={sorted(list(payload.keys()))}")
         return
 
+    persist_new_bar = False
     async with state_lock:
         state = _get_bot_state(bot_id)
         prev_ts = state.get("last_bar_payload_ts_utc") or state.get("last_bar_ts")
         current_mode = state.get("mode", "LIVE")
+        incoming_mode = payload.get("nt_mode") or payload.get("mode") or current_mode
         state = update_bot_state(
             bot_id,
             instrument=symbol,
-            mode=payload.get("mode", current_mode),
+            mode=incoming_mode,
         )
         # last_seen_utc must reflect WS receive time (never payload ts).
         state["last_seen_utc"] = _iso(now)
@@ -410,8 +593,8 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
         state["last_bar_payload_ts_utc"] = ts_iso
         state["bar_ts_utc"] = ts_iso
         state["last_bar_rx_utc"] = _iso(now)
-        if payload.get("mode") is not None:
-            state["last_mode"] = payload.get("mode")
+        if incoming_mode is not None:
+            state["last_mode"] = incoming_mode
         state["last_bar_dt"] = ts.astimezone(timezone.utc).isoformat()
         state["last_price"] = c
         state["last_ohlc"] = {"open": o, "high": h, "low": l, "close": c}
@@ -438,6 +621,19 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
             except Exception:
                 pass
 
+        # Coalesce DB persistence: persist only when the payload bar timestamp advances for this timeframe.
+        try:
+            if timeframe:
+                m = state.get("last_persisted_bar_ts_by_tf")
+                if not isinstance(m, dict):
+                    m = {}
+                if m.get(timeframe) != ts_iso:
+                    m[timeframe] = ts_iso
+                    state["last_persisted_bar_ts_by_tf"] = m
+                    persist_new_bar = True
+        except Exception:
+            persist_new_bar = False
+
     # Update market ring-buffer (symbol+timeframe) for deterministic market metrics.
     try:
         market_buffer.add_bar(
@@ -452,35 +648,152 @@ async def _handle_bar_data(bot_id: str, payload: Dict[str, Any]) -> None:
                 volume=int(vol or 0),
                 bid=float(bid) if bid is not None else None,
                 ask=float(ask) if ask is not None else None,
+                rx_ts_utc=now,
             )
         )
     except Exception:
         # Never break WS path on metrics cache updates.
         pass
 
-    asyncio.create_task(asyncio.to_thread(_save_bar_sync, bot_id, payload))
-    asyncio.create_task(
-        asyncio.to_thread(
-            _save_event_sync,
-            bot_id,
-            "BAR_DATA_RX",
-            {"botId": bot_id, "symbol": symbol, "timeframe": timeframe, "mode": payload.get("mode")},
-        )
-    )
-    await _broadcast_live(
-        {
-            "type": "bar_update",
-            "data": {
-                "botId": bot_id,
-                "symbol": symbol,
-                "price": c,
-                "ohlc": {"open": o, "high": h, "low": l, "close": c},
-                "volume": vol,
-                "timestamp": ts_iso,
-            },
-        }
-    )
-    await _run_inference_and_update(bot_id, payload)
+    # Persist BAR_DATA to DB only on new bars (per timeframe) and coalesce pending writes.
+    if persist_new_bar:
+        replaced = _schedule_persist_bar(bot_id, payload)
+        if replaced:
+            async with state_lock:
+                st = _get_bot_state(bot_id)
+                st["dropped_persist_bar_count"] = int(st.get("dropped_persist_bar_count") or 0) + 1
+                st["last_persist_drop_ts_utc"] = _iso(now)
+
+    # Throttle bar_update broadcasts (UI can render from Market Metrics v1 anyway).
+    try:
+        last = _last_bar_update_broadcast_utc.get(bot_id)
+        if last is None or (now - last).total_seconds() >= 0.25:
+            _last_bar_update_broadcast_utc[bot_id] = now
+            asyncio.create_task(
+                _broadcast_live(
+                    {
+                        "type": "bar_update",
+                        "data": {
+                            "botId": bot_id,
+                            "symbol": symbol,
+                            "price": c,
+                            "ohlc": {"open": o, "high": h, "low": l, "close": c},
+                            "volume": vol,
+                            "timestamp": ts_iso,
+                        },
+                    }
+                )
+            )
+    except Exception:
+        pass
+
+    # Broadcast Market Metrics v1 snapshots so the UI and assistant see the same facts.
+    try:
+        # Throttle metrics broadcasts to avoid blocking Ninja WS receive loop.
+        do_broadcast = True
+        last_mm = _last_market_metrics_broadcast_utc.get(bot_id)
+        if last_mm is not None and (now - last_mm).total_seconds() < 1.0:
+            do_broadcast = False
+        else:
+            _last_market_metrics_broadcast_utc[bot_id] = now
+
+        now_utc = now
+        feed = compute_feed_status(bot_id)
+        data_source = (feed.get("data_source") or "UNKNOWN").upper()
+        platform_fs = (feed.get("feed_status") or "").upper()
+
+        def _to_z(value: Optional[str]) -> Optional[str]:
+            if not value:
+                return None
+            s = str(value).strip()
+            if s.endswith("Z"):
+                return s
+            if s.endswith("+00:00"):
+                return s.replace("+00:00", "Z")
+            return s
+
+        last_ws_ts_utc = _to_z(feed.get("last_seen_utc") or feed.get("last_ws_rx_utc"))
+        ws_age_sec = feed.get("ws_age_sec")
+
+        if do_broadcast:
+            # Always publish 1m and 5m (if present) for the current symbol.
+            for tf in ("1m", "5m"):
+                bars_tf = market_buffer.get_bars(symbol=str(symbol), timeframe=tf, limit=500)
+                last_rx = market_buffer.last_rx_ts(symbol=str(symbol), timeframe=tf)
+                bar_age_sec = float(max(0.0, (now_utc - last_rx).total_seconds())) if last_rx is not None else None
+                metrics, notes = compute_market_metrics_v1(
+                    bars=bars_tf,
+                    symbol=str(symbol).upper(),
+                    timeframe=tf,
+                    ws_age_sec=ws_age_sec,
+                    bar_age_sec_override=bar_age_sec,
+                    last_ws_ts_utc=last_ws_ts_utc,
+                    ws_stale_sec=10.0,
+                    lookback=500,
+                    mode="summary",
+                )
+
+                # Coherence/anti-invention gating (same policy as the HTTP endpoint):
+                def _freshness_note() -> str:
+                    ws_age_s = "null" if metrics.get("ws_age_sec") is None else f"{float(metrics.get('ws_age_sec')):.3f}"
+                    bar_age_s = "null" if metrics.get("bar_age_sec") is None else f"{float(metrics.get('bar_age_sec')):.3f}"
+                    return (
+                        "freshness:"
+                        f" ws_age_sec={ws_age_s}"
+                        f" bar_age_sec={bar_age_s}"
+                        f" ws_stale_sec={float(metrics.get('ws_stale_sec') or 10.0):.3f}"
+                        f" bar_stale_sec={float(metrics.get('bar_stale_sec') or 0.0):.3f}"
+                    )
+
+                if data_source != "LIVE_WS":
+                    metrics["source"] = data_source
+                    metrics["feed_status"] = "NO_LIVE"
+                    metrics["confidence"] = "low"
+                    notes.append(f"non-live data_source={data_source}")
+                    notes.append(_freshness_note())
+                else:
+                    metrics["source"] = "LIVE_WS"
+
+                if platform_fs != "LIVE":
+                    if platform_fs == "NO_LIVE":
+                        metrics["feed_status"] = "NO_LIVE"
+                    elif metrics.get("feed_status") == "LIVE":
+                        metrics["feed_status"] = "STALE"
+                    metrics["confidence"] = "low"
+                    notes.append(f"platform feed_status={platform_fs}")
+                    notes.append(_freshness_note())
+
+                if metrics.get("source") != "LIVE_WS" or metrics.get("feed_status") in {"STALE", "NO_LIVE"}:
+                    metrics["confidence"] = "low"
+                    notes.append(_freshness_note())
+
+                metrics["notes"] = list(dict.fromkeys(notes))
+
+                asyncio.create_task(
+                    _broadcast_live(
+                        {
+                            "type": "market_metrics",
+                            "data": {"botId": bot_id, "symbol": str(symbol).upper(), "timeframe": tf, "metrics": metrics},
+                        }
+                    )
+                )
+    except Exception:
+        pass
+
+    # Never block the WS receive loop on inference. Ensure at most one in-flight job per bot.
+    try:
+        if bot_id not in _inference_inflight:
+            _inference_inflight.add(bot_id)
+
+            async def _infer_guarded() -> None:
+                try:
+                    await _run_inference_and_update(bot_id, payload)
+                finally:
+                    _inference_inflight.discard(bot_id)
+
+            asyncio.create_task(_infer_guarded())
+    except Exception:
+        _inference_inflight.discard(bot_id)
 
 
 async def _handle_heartbeat(bot_id: str, payload: Dict[str, Any]) -> None:
@@ -619,7 +932,7 @@ def _save_event_sync(bot_id: str, event_type: str, data: Dict[str, Any]) -> None
             ts_utc=datetime.now(timezone.utc),
         )
         db.add(row)
-        db.commit()
+        _commit_with_retry(db, label="save_system_event")
     except Exception as exc:
         print(f"[ws] Event save error: {exc}")
     finally:

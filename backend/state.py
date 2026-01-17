@@ -234,12 +234,15 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     elif data_source in {"SIMULATED", "UNKNOWN_TS", "CACHED"}:
         data_source_kind = data_source
 
-    # "LIVE" in UI only means recent LIVE_WS bars; cached data can never be "LIVE".
+    # v1 status aligns with Market Metrics: LIVE|STALE|NO_LIVE.
+    # Rule: only LIVE_WS + fresh BAR_DATA can be LIVE.
     if last_bar_rx_dt is None:
-        feed_status = "NO_FEED"
+        feed_status = "NO_LIVE"
     elif data_source == "UNKNOWN_TS":
         feed_status = "STALE"
-    elif data_source == "LIVE_WS" and bar_age_sec is not None and bar_age_sec <= feed_stale_sec:
+    elif data_source != "LIVE_WS":
+        feed_status = "NO_LIVE"
+    elif bar_age_sec is not None and bar_age_sec <= feed_stale_sec:
         feed_status = "LIVE"
     else:
         feed_status = "STALE"
@@ -276,18 +279,27 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     elif ws_age_sec is not None and ws_age_sec > ws_stale_sec:
         feed_reason = f"ws_age_sec>{round(ws_stale_sec, 3)}"
 
+    # Backward-compatible alias used by older UI/widgets/tests.
+    # Legacy used "NO_FEED" where v1 uses "NO_LIVE".
+    feed_status_legacy = "NO_FEED" if feed_status == "NO_LIVE" else feed_status
+
     # Connection health (for "Connected" UI): ws open + last_seen receive time.
-    conn_threshold_sec = 5.0
+    # IMPORTANT:
+    # - BAR_DATA may arrive only once per minute (1m) while WS is still healthy.
+    # - MONITOR is a real Ninja WS message too, and ws_age_sec tracks any WS activity.
+    # Use ws_age_sec + ws_stale_sec for connection health to avoid "DISCONNECTED" flicker.
+    conn_threshold_sec = float(max(5.0, min(30.0, ws_stale_sec)))
     connection_status = "DISCONNECTED"
     if ws_open:
-        if last_seen_age_sec is not None and last_seen_age_sec <= conn_threshold_sec:
+        conn_age = ws_age_sec if ws_age_sec is not None else last_seen_age_sec
+        if conn_age is not None and conn_age <= conn_threshold_sec:
             connection_status = "OK"
         else:
             connection_status = "STALE"
 
     # Stream source label (UI should treat only NINJA as real-time).
     data_source_stream = "UNKNOWN"
-    if ws_open and last_seen_age_sec is not None and last_seen_age_sec <= conn_threshold_sec and data_source == "LIVE_WS":
+    if ws_open and connection_status == "OK" and data_source == "LIVE_WS":
         data_source_stream = "NINJA"
     elif data_source in {"CACHED", "SIMULATED", "UNKNOWN_TS"}:
         data_source_stream = data_source
@@ -297,6 +309,7 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
     return {
         "bot_id": bot_id,
         "feed_status": feed_status,
+        "feed_status_legacy": feed_status_legacy,
         "ws_connected": ws_connected,
         "transport_connected": ws_connected,
         "ws_open": ws_open,
@@ -330,4 +343,10 @@ def compute_feed_status(bot_id: str) -> Dict[str, Any]:
         "last_volume": state.get("last_volume"),
         "last_vwap": state.get("last_vwap"),
         "vol_ok": state.get("vol_ok"),
+        # Backpressure / diagnostics (optional; stable keys for ops/UI).
+        "dropped_bar_count": int(state.get("dropped_bar_count") or 0),
+        "last_drop_ts_utc": state.get("last_drop_ts_utc"),
+        "drop_reason": state.get("drop_reason"),
+        "dropped_persist_bar_count": int(state.get("dropped_persist_bar_count") or 0),
+        "last_persist_drop_ts_utc": state.get("last_persist_drop_ts_utc"),
     }

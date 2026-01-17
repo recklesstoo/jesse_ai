@@ -5,7 +5,8 @@ param(
     [int]$DelayMs = 400,
     [switch]$BackendOnly,
     [switch]$FrontendOnly,
-    [switch]$SmokeTest
+    [switch]$SmokeTest,
+    [switch]$Reload
 )
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -16,7 +17,9 @@ function Get-ListeningPidsForPort {
 
     try {
         $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
-        return @($conns | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { $_ -gt 0 })
+        $pids = @($conns | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { $_ -gt 0 })
+        # Ignore stale PIDs that no longer exist (rare race during shutdown).
+        return @($pids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
     } catch {
         $pids = New-Object System.Collections.Generic.List[int]
         try {
@@ -32,7 +35,8 @@ function Get-ListeningPidsForPort {
         } catch {
             return @()
         }
-        return @($pids)
+        # Ignore stale PIDs that no longer exist (netstat can race).
+        return @($pids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
     }
 }
 
@@ -83,12 +87,19 @@ function Release-Port {
         }
         Write-Host "Port $Port LISTENING PIDs: $($pidLabels -join ', ')"
 
+        # If all PIDs are already gone, give the OS a moment to drop the socket entry and re-check.
+        $livePids = @($pids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if ($livePids.Count -eq 0) {
+            Start-Sleep -Milliseconds 250
+            continue
+        }
+
         if ($pids -contains 4) {
             Write-Warning "Port $Port is held by SYSTEM/service (PID 4); cannot stop safely."
             break
         }
 
-        foreach ($owningPid in $pids) {
+        foreach ($owningPid in $livePids) {
             $proc = Get-Process -Id $owningPid -ErrorAction SilentlyContinue
             if (-not $proc) { continue }
             Write-Host "Stopping PID $owningPid ($($proc.ProcessName))..."
@@ -104,13 +115,19 @@ function Release-Port {
         return $true
     }
 
+    $remainingLive = @($remaining | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($remainingLive.Count -eq 0) {
+        Write-Host "Port $Port is free."
+        return $true
+    }
+
     Write-Warning "Failed to release port $Port after $MaxCycles cycles."
     Write-Host "Diagnostic: netstat -ano | findstr \":$Port\""
     try { netstat -ano | findstr ":$Port" } catch { }
 
     if ($remaining.Count -gt 0) {
         Write-Host "Processes still owning LISTENING sockets:"
-        foreach ($owningPid in $remaining) {
+        foreach ($owningPid in $remainingLive) {
             $proc = Get-Process -Id $owningPid -ErrorAction SilentlyContinue
             if ($proc) {
                 Write-Host ("- {0} ({1})" -f $owningPid, $proc.ProcessName)
@@ -185,12 +202,17 @@ foreach ($port in $portsToRelease) {
     }
 }
 
+$reloadFlags = ""
+if ($Reload) {
+    $reloadFlags = "--reload --reload-dir '$RepoRoot\\backend' --reload-dir '$RepoRoot\\backend\\routers' --reload-dir '$RepoRoot\\backend\\services' --reload-dir '$RepoRoot\\backend\\ws'"
+}
+
 $BackendCommand = @"
 Set-Location -Path '$RepoRoot';
 `$env:PYTHONPATH = '$RepoRoot';
 if (Test-Path '.\\.venv\\Scripts\\python.exe') { } else { Write-Error 'Missing .venv. Run scripts\\doctor.ps1 first.'; exit 1 }
 Write-Host 'Backend log: $BackendLog';
-& .\\.venv\\Scripts\\python.exe -m uvicorn backend.app:app --host 0.0.0.0 --port $BackendPort --reload --reload-dir backend --reload-dir backend/routers --reload-dir backend/services --reload-dir backend/ws 2>&1 | ForEach-Object { `$_.ToString() } | Tee-Object -FilePath '$BackendLog' -Append;
+& .\\.venv\\Scripts\\python.exe -m uvicorn --app-dir '$RepoRoot' backend.app:app --host 0.0.0.0 --port $BackendPort $reloadFlags 2>&1 | ForEach-Object { `$_.ToString() } | Tee-Object -FilePath '$BackendLog' -Append;
 "@
 
 $FrontendCommand = @"
@@ -198,7 +220,7 @@ Set-Location -Path '$RepoRoot\frontend';
 `$env:VITE_API_BASE = 'http://127.0.0.1:$BackendPort';
 `$env:VITE_BOT_ID = 'bot-1';
 Write-Host 'Frontend log: $FrontendLog';
-npm run dev -- --port $FrontendPort 2>&1 | ForEach-Object { `$_.ToString() } | Tee-Object -FilePath '$FrontendLog' -Append;
+npm run dev -- $FrontendPort 2>&1 | ForEach-Object { `$_.ToString() } | Tee-Object -FilePath '$FrontendLog' -Append;
 "@
 
 $backendPidPath = Join-Path $LogsRoot "backend_pid.txt"

@@ -33,15 +33,18 @@ def test_market_metrics_ok_when_fresh_and_enough_lookback() -> None:
         symbol="MNQ",
         timeframe="1m",
         ws_age_sec=1.0,
+        bar_age_sec_override=1.0,
         last_ws_ts_utc=(now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
         ws_stale_sec=10.0,
         lookback=500,
         mode="summary",
     )
-    assert resp["feed_status"] == "OK"
+    assert resp["feed_status"] == "LIVE"
     assert resp["confidence"] in ("high", "medium")
     assert resp["availability"]["bars"] is True
     assert resp["metrics"]["base"]["atr_14_ticks"] > 0
+    assert resp["ws_stale_sec"] == 10.0
+    assert resp["bar_stale_sec"] == 90.0
 
 
 def test_market_metrics_stale_when_ws_old() -> None:
@@ -52,6 +55,7 @@ def test_market_metrics_stale_when_ws_old() -> None:
         symbol="MNQ",
         timeframe="1m",
         ws_age_sec=25.0,
+        bar_age_sec_override=1.0,
         last_ws_ts_utc=(now - timedelta(seconds=25)).isoformat().replace("+00:00", "Z"),
         ws_stale_sec=10.0,
         lookback=30,
@@ -60,4 +64,36 @@ def test_market_metrics_stale_when_ws_old() -> None:
     assert resp["feed_status"] == "STALE"
     assert resp["confidence"] == "low"
     assert any("ws stale" in n for n in notes)
+    assert any("freshness:" in n and "ws_age_sec=" in n and "bar_age_sec=" in n for n in notes)
 
+
+def test_market_metrics_bar_stale_thresholds_by_timeframe() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    bars_5m = [_mk_bar(now - timedelta(minutes=5 * (29 - i)), close=25000 + i * 0.25, tf="5m") for i in range(30)]
+    resp, notes = compute_market_metrics_v1(
+        bars=bars_5m,
+        symbol="MNQ",
+        timeframe="5m",
+        ws_age_sec=1.0,
+        bar_age_sec_override=449.0,
+        last_ws_ts_utc=(now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+        ws_stale_sec=10.0,
+        lookback=30,
+        mode="summary",
+    )
+    assert resp["bar_stale_sec"] == 450.0
+    assert resp["feed_status"] == "LIVE"
+    resp2, notes2 = compute_market_metrics_v1(
+        bars=bars_5m,
+        symbol="MNQ",
+        timeframe="5m",
+        ws_age_sec=1.0,
+        bar_age_sec_override=451.0,
+        last_ws_ts_utc=(now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+        ws_stale_sec=10.0,
+        lookback=30,
+        mode="summary",
+    )
+    assert resp2["feed_status"] == "STALE"
+    assert any("bar stale" in n for n in notes2)
+    assert any("freshness:" in n for n in notes2)

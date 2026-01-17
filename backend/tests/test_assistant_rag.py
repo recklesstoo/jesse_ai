@@ -33,6 +33,11 @@ def test_assistant_chat_calls_tools() -> None:
     data = r.json()
     assert data.get("reply")
 
+    # opsMode can be server-disabled (e.g., WYCKOFF_AI_OPS_TOKEN required but not provided).
+    status = data.get("status") or {}
+    if isinstance(status, dict) and status.get("ops_mode") is False:
+        return
+
     if not (os.getenv("OPENAI_API_KEY") or "").strip():
         # Not configured: should still return a diagnostic reply without throwing.
         return

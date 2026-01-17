@@ -1,10 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import MLTrainingPanel from "./components/MLTrainingPanel";
-import ModelManager from "./components/ModelManager";
-import TrainingHistoryChart from "./components/TrainingHistoryChart";
-import ConfusionMatrixHeatmap from "./components/ConfusionMatrixHeatmap";
 import AIAssistantPanel from "./components/AIAssistantPanel";
 import DataManagerPanel from "./components/DataManagerPanel";
+import BotTrainingPanel from "./components/BotTrainingPanel";
+import { useMarketSnapshot } from "./hooks/useMarketSnapshot";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 const WS_BASE =
@@ -13,7 +11,6 @@ const WS_BASE =
     ? API_BASE.replace(/^http/i, "ws")
     : (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:3001").replace(/^http/i, "ws"));
 const BOT_ID = import.meta.env.VITE_BOT_ID || "bot-1";
-const PRICE_REFRESH_MS = Number(import.meta.env.VITE_PRICE_REFRESH_MS || 200);
 const EXEC_TOKEN_STORAGE_KEY = "wyckoff_exec_token";
 
 const formatNum = (value, digits = 2) => {
@@ -394,7 +391,7 @@ function ToastContainer({ toasts }) {
 export default function App() {
   const [connected, setConnected] = useState(false);
   const [feedState, setFeedState] = useState({
-    feed_status: "NO_FEED",
+    feed_status: "NO_LIVE",
     ws_connected: false,
     ws_age_sec: null,
     last_bar_ts_utc: null,
@@ -422,6 +419,15 @@ export default function App() {
   });
   const [botStatus, setBotStatus] = useState({});
   const [instrumentChoice, setInstrumentChoice] = useState("");
+
+  const marketSymbol = (instrumentChoice || "MNQ").toUpperCase();
+  const { metrics: marketMetrics1m, snapshot: marketSnapshot1m, updateFromWs: updateMarket1mFromWs } = useMarketSnapshot({
+    symbol: marketSymbol,
+    timeframe: "1m",
+    lookback: 500,
+    mode: "summary",
+    pollMs: 1000
+  });
 
   const [qty, setQty] = useState(1);
   const [orderType, setOrderType] = useState("Market");
@@ -465,9 +471,6 @@ export default function App() {
     }
   });
 
-  const [opsAssistantEnabled, setOpsAssistantEnabled] = useState(false);
-  const [opsAssistantIncludeWeb, setOpsAssistantIncludeWeb] = useState(false);
-
   const [botsRegistry, setBotsRegistry] = useState(null);
   const [eventTimeline, setEventTimeline] = useState([]);
   const [swarmRank, setSwarmRank] = useState([]);
@@ -504,16 +507,9 @@ export default function App() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
   };
 
-  const [chatInput, setChatInput] = useState("");
-  const [chatMessages, setChatMessages] = useState([
-    { role: "assistant", content: "Wyckoff AI listo. Preguntame por estado, ejecuciones o riesgo." }
-  ]);
-
   const wsRef = useRef(null);
   const wsRetryRef = useRef(0);
   const wsTimerRef = useRef(null);
-  const barBufferRef = useRef(null);
-  const barFlushRef = useRef(null);
   const logTimerRef = useRef(null);
   const healthTimerRef = useRef(null);
   const metricsTimerRef = useRef(null);
@@ -593,60 +589,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const flushBar = () => {
-      if (barBufferRef.current) {
-        const next = barBufferRef.current;
-        barBufferRef.current = null;
-        setBar((prev) => ({
-          ...prev,
-          symbol: next.symbol || prev.symbol,
-          price: next.price,
-          ohlc: next.ohlc || prev.ohlc,
-          volume: next.volume,
-          timestamp: next.timestamp
-        }));
-      }
-    };
-    barFlushRef.current = setInterval(flushBar, PRICE_REFRESH_MS);
-    return () => clearInterval(barFlushRef.current);
-  }, []);
-
-  useEffect(() => {
     const pollState = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/v1/state?botId=${BOT_ID}`);
         if (!res.ok) return;
         const data = await res.json();
         setFeedState(data);
-
-        setBar((prev) => {
-          const nextTs = data.last_bar_ts_utc;
-          if (!nextTs) {
-            if (data.feed_status === "NO_FEED" && !prev.timestamp) {
-              return {
-                ...prev,
-                price: null,
-                ohlc: { open: null, high: null, low: null, close: null },
-                volume: null,
-                timestamp: null
-              };
-            }
-            return prev;
-          }
-
-          const prevTime = prev.timestamp ? new Date(prev.timestamp).getTime() : 0;
-          const nextTime = new Date(nextTs).getTime();
-          if (!Number.isFinite(nextTime) || nextTime <= prevTime) return prev;
-
-          return {
-            ...prev,
-            symbol: data.last_symbol || prev.symbol,
-            price: data.last_price ?? prev.price,
-            ohlc: data.last_ohlc || prev.ohlc,
-            volume: data.last_volume ?? prev.volume,
-            timestamp: nextTs
-          };
-        });
       } catch (err) {
         // Ignore state polling failures.
       }
@@ -656,6 +604,18 @@ export default function App() {
     const timer = setInterval(pollState, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    // Single source of market facts for the dashboard: Market Metrics v1.
+    if (!marketSnapshot1m) return;
+    setBar({
+      symbol: marketSnapshot1m.symbol || "MNQ",
+      price: marketSnapshot1m.last_price ?? null,
+      ohlc: marketSnapshot1m.ohlc || { open: null, high: null, low: null, close: null },
+      volume: marketSnapshot1m.volume ?? null,
+      timestamp: marketSnapshot1m.last_bar_ts_utc || null
+    });
+  }, [marketSnapshot1m]);
 
   useEffect(() => {
     const connect = () => {
@@ -689,16 +649,14 @@ export default function App() {
       ws.addEventListener("message", (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === "bar_update") {
+          if (msg.type === "market_metrics") {
             const msgBotId = msg?.data?.botId || msg?.data?.bot_id;
             if (msgBotId && msgBotId !== BOT_ID) return;
-            barBufferRef.current = {
-              symbol: msg.data.symbol,
-              price: msg.data.price,
-              ohlc: msg.data.ohlc,
-              volume: msg.data.volume,
-              timestamp: msg.data.timestamp
-            };
+            const tf = String(msg?.data?.timeframe || "").toLowerCase();
+            if (tf !== "1m") return;
+            const metrics = msg?.data?.metrics;
+            if (!metrics) return;
+            updateMarket1mFromWs(metrics);
           }
           if (msg.type === "bot_status") {
             const statusBotId = msg?.data?.status?.botId || msg?.data?.status?.bot_id;
@@ -1203,15 +1161,19 @@ export default function App() {
     return `${mm}:${ss}`;
   }, [clock, sessionStart]);
 
-  const feedAgeSec = useMemo(() => {
-    const stateAge = feedState?.bar_age_sec;
-    if (stateAge !== null && stateAge !== undefined) return Math.max(0, Math.round(Number(stateAge)));
+  const marketFeedStatus = String(marketSnapshot1m?.feed_status || "NO_LIVE").toUpperCase();
+  const marketSource = String(marketSnapshot1m?.source || "NO_LIVE").toUpperCase();
+  const marketConfidence = String(marketSnapshot1m?.confidence || "low").toLowerCase();
+  const marketNotes = Array.isArray(marketSnapshot1m?.notes) ? marketSnapshot1m.notes : [];
+  const marketBarAgeSec = useMemo(() => {
+    const value = marketSnapshot1m?.bar_age_sec;
+    if (value !== null && value !== undefined) return Math.max(0, Math.round(Number(value)));
     return null;
-  }, [feedState?.bar_age_sec]);
+  }, [marketSnapshot1m?.bar_age_sec]);
 
   const dataSource = (feedState?.data_source || "NONE").toUpperCase();
   const dataSourceStream = (feedState?.data_source_stream || "UNKNOWN").toUpperCase();
-  const feedOk = dataSource === "LIVE_WS" && feedState?.feed_status === "LIVE";
+  const feedOk = marketSource === "LIVE_WS" && marketFeedStatus === "LIVE";
   const monitorOk = feedState?.monitor_status === "OK";
   const monitorAgeSec = useMemo(() => {
     const value = feedState?.monitor_age_sec;
@@ -1229,71 +1191,29 @@ export default function App() {
   }, [backendMode, feedOk, ntMode]);
 
   const priceIsReal = dataSourceStream === "NINJA" && bridgeConnected && feedOk;
-  const displayPrice = priceIsReal ? formatNum(bar.price, 2) : "--";
-  const displayOpen = priceIsReal ? formatNum(bar.ohlc.open, 2) : "--";
-  const displayHigh = priceIsReal ? formatNum(bar.ohlc.high, 2) : "--";
-  const displayLow = priceIsReal ? formatNum(bar.ohlc.low, 2) : "--";
-  const displayClose = priceIsReal ? formatNum(bar.ohlc.close, 2) : "--";
-  const displayVol = priceIsReal ? formatNum(bar.volume, 0) : "--";
-  const displayLastBar = priceIsReal ? formatTime(bar.timestamp) : "--";
+  const displayPrice = bar.price === null || bar.price === undefined ? "--" : formatNum(bar.price, 2);
+  const displayOpen = bar.ohlc.open === null || bar.ohlc.open === undefined ? "--" : formatNum(bar.ohlc.open, 2);
+  const displayHigh = bar.ohlc.high === null || bar.ohlc.high === undefined ? "--" : formatNum(bar.ohlc.high, 2);
+  const displayLow = bar.ohlc.low === null || bar.ohlc.low === undefined ? "--" : formatNum(bar.ohlc.low, 2);
+  const displayClose = bar.ohlc.close === null || bar.ohlc.close === undefined ? "--" : formatNum(bar.ohlc.close, 2);
+  const displayVol = bar.volume === null || bar.volume === undefined ? "--" : formatNum(bar.volume, 0);
+  const displayLastBar = bar.timestamp ? formatTime(bar.timestamp) : "--";
   const wsStaleSec = useMemo(() => {
-    const value = feedState?.ws_stale_sec;
-    if (value === null || value === undefined) return 2;
+    const value = marketSnapshot1m?.ws_stale_sec;
+    if (value === null || value === undefined) return 10;
     return Math.max(1, Math.round(Number(value)));
-  }, [feedState?.ws_stale_sec]);
+  }, [marketSnapshot1m?.ws_stale_sec]);
   const wsAgeSec = useMemo(() => {
-    const value = feedState?.ws_age_sec;
+    const value = marketSnapshot1m?.ws_age_sec;
     if (value === null || value === undefined) return null;
     return Math.max(0, Math.round(Number(value)));
-  }, [feedState?.ws_age_sec]);
+  }, [marketSnapshot1m?.ws_age_sec]);
 
   const execMode = (executionStatus?.execution_mode || "MANUAL_ONLY").toUpperCase();
   const execModeClass = execMode === "DISABLED" ? "pill-warn" : execMode === "LIVE_ALLOWED" ? "pill-ok" : "pill-warn";
 
   const lastExec = execs[0];
   const lastExecEvent = lastExec ? lastEventById[lastExec.id] || (lastExec.error ? "ERROR" : "SENT") : null;
-
-  const chatContext = useMemo(() => {
-    const parts = [];
-    if (botStatus.mode) parts.push(`Mode ${botStatus.mode}`);
-    if (bar.symbol) parts.push(bar.symbol);
-    if (bar.price !== null && bar.price !== undefined) parts.push(`Last ${formatNum(bar.price, 2)}`);
-    if (bar.timestamp) parts.push(`@ ${formatTime(bar.timestamp)}`);
-    return parts.join(" | ");
-  }, [bar.price, bar.symbol, bar.timestamp, botStatus.mode]);
-
-  const sendChat = async () => {
-    const messageText = chatInput.trim();
-    if (!messageText) return;
-    const next = [...chatMessages, { role: "user", content: messageText }];
-    setChatMessages(next);
-    setChatInput("");
-
-    try {
-      if (opsAssistantEnabled) {
-        const res = await fetch(`${API_BASE}/api/v1/assistant/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ botId: BOT_ID, message: messageText, includeWeb: opsAssistantIncludeWeb })
-        });
-        const data = await res.json();
-        setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply || "Sin respuesta." }]);
-      } else {
-        const res = await fetch(`${API_BASE}/api/v1/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ botId: BOT_ID, messages: next.slice(-10) })
-        });
-        const data = await res.json();
-        setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply || "Sin respuesta." }]);
-      }
-    } catch (err) {
-      setChatMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "No se pudo contactar al chat." }
-      ]);
-    }
-  };
 
   const generateSwarmPlan = async () => {
     try {
@@ -1510,10 +1430,10 @@ export default function App() {
             WS AGE {wsAgeSec === null ? "--" : `${wsAgeSec}s`}
           </span>
           <span className={`pill ${feedOk ? "pill-ok" : "pill-warn"}`}>
-            BAR AGE {feedAgeSec === null ? "--" : `${feedAgeSec}s`}
+            BAR AGE {marketBarAgeSec === null ? "--" : `${marketBarAgeSec}s`}
           </span>
-          <span className={`pill ${feedOk ? "pill-ok" : "pill-warn"}`} title={feedState?.feed_reason || ""}>
-            FEED {feedOk ? "OK" : feedState.feed_status === "NO_FEED" ? "NO FEED" : "STALE"}
+          <span className={`pill ${feedOk ? "pill-ok" : "pill-warn"}`} title={marketNotes.join("\n")}>
+            FEED {feedOk ? "LIVE" : marketFeedStatus} {marketConfidence === "low" ? "(low)" : marketConfidence === "medium" ? "(med)" : "(high)"}
           </span>
           <span className={`pill ${monitorOk ? "pill-ok" : "pill-warn"}`}>
             MON AGE {monitorAgeSec === null ? "--" : `${monitorAgeSec}s`}
@@ -1528,8 +1448,11 @@ export default function App() {
           </button>
         </div>
       </header>
-      {feedState.feed_status !== "LIVE" && !bar.timestamp && (
+      {marketFeedStatus === "NO_LIVE" && !bar.timestamp && (
         <div className="error-banner">WAITING FOR NINJATRADER DATA (BridgePuppet)</div>
+      )}
+      {marketFeedStatus === "STALE" && bar.timestamp && (
+        <div className="error-banner">MARKET FEED STALE (showing last known values)</div>
       )}
       {activeError && <div className="error-banner">{activeError}</div>}
       {activeError && (
@@ -1852,10 +1775,7 @@ export default function App() {
         </section>
 
         <section className="card ml-card">
-          <MLTrainingPanel botId={BOT_ID} onToast={addToast} />
-          <ModelManager botId={BOT_ID} onToast={addToast} />
-          <TrainingHistoryChart botId={BOT_ID} />
-          <ConfusionMatrixHeatmap botId={BOT_ID} />
+          <BotTrainingPanel botId={BOT_ID} />
         </section>
 
         <section className="card limits-card">
@@ -1967,38 +1887,6 @@ export default function App() {
         <DataManagerPanel />
 
         <AIAssistantPanel botId={BOT_ID} />
-
-        <section className="card chat-card">
-          <div className="card-header">
-            <span className="label">WYCKOFF AI ASSISTANT</span>
-            <span className="pill pill-mini">BETA</span>
-          </div>
-          <div className="signal-hint">
-            <label style={{ marginRight: 12 }}>
-              <input type="checkbox" checked={opsAssistantEnabled} onChange={(e) => setOpsAssistantEnabled(e.target.checked)} /> Ops mode
-            </label>
-            <label>
-              <input type="checkbox" checked={opsAssistantIncludeWeb} onChange={(e) => setOpsAssistantIncludeWeb(e.target.checked)} /> includeWeb
-            </label>
-          </div>
-          {chatContext && <div className="chat-context">{chatContext}</div>}
-          <div className="chat-body">
-            {chatMessages.map((m, idx) => (
-              <div key={idx} className={`chat-msg ${m.role}`}>
-                <div className="chat-role">{m.role}</div>
-                <div className="chat-text">{m.content}</div>
-              </div>
-            ))}
-          </div>
-          <div className="chat-input">
-            <input
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              placeholder="Ask about execution, risk, or market context..."
-            />
-            <button onClick={sendChat}>SEND</button>
-          </div>
-        </section>
 
         <section className="card calendar-card">
           <div className="card-header">

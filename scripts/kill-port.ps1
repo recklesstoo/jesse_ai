@@ -29,7 +29,11 @@ function Get-NetstatListeningPids {
         # ignore
     }
 
-    return ($pids | Select-Object -Unique)
+    $unique = ($pids | Select-Object -Unique)
+    # Ignore stale PIDs that no longer exist (netstat can race).
+    return @(
+        $unique | Where-Object { $_ -gt 0 } | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }
+    )
 }
 
 function Stop-ProcessTree {
@@ -40,7 +44,7 @@ function Stop-ProcessTree {
 
     try {
         # taskkill handles process trees reliably on Windows.
-        taskkill.exe /PID $ProcessId /T /F | Out-Null
+        taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
         return
     } catch {
         # Fall back to manual recursion.
@@ -73,24 +77,30 @@ function Release-Port {
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         $listeners = Get-ListeningProcesses -Port $Port
         $netstatPids = Get-NetstatListeningPids -Port $Port
-        if (-not $listeners -and (-not $netstatPids -or $netstatPids.Count -eq 0)) {
+
+        $listenerPids = @(
+            $listeners | ForEach-Object { $_.OwningProcess } | Where-Object { $_ -and ([int]$_) -gt 0 } | Select-Object -Unique
+        )
+        $liveListenerPids = @($listenerPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+
+        if ($liveListenerPids.Count -eq 0 -and (-not $netstatPids -or $netstatPids.Count -eq 0)) {
             Write-Host "Port $Port is free."
             return $true
         }
 
-        foreach ($listener in $listeners) {
-            if (-not $listener.OwningProcess) {
-                continue
+        foreach ($processId in $liveListenerPids) {
+            Stop-ProcessTree -ProcessId ([int]$processId)
+            if (-not (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                Write-Host "Stopped process tree for PID $processId holding port $Port (attempt $attempt)."
             }
-            $processId = [int]$listener.OwningProcess
-            Stop-ProcessTree -ProcessId $processId
-            Write-Host "Stopped process tree for PID $processId holding port $Port (attempt $attempt)."
         }
 
         foreach ($netPid in $netstatPids) {
             if (-not $netPid) { continue }
             Stop-ProcessTree -ProcessId ([int]$netPid)
-            Write-Host "Stopped netstat PID $netPid holding port $Port (attempt $attempt)."
+            if (-not (Get-Process -Id $netPid -ErrorAction SilentlyContinue)) {
+                Write-Host "Stopped netstat PID $netPid holding port $Port (attempt $attempt)."
+            }
         }
 
         # Targeted fallback for known dev processes (handles uvicorn reload trees).
@@ -119,7 +129,13 @@ function Release-Port {
 
     $stillListening = Get-ListeningProcesses -Port $Port
     $stillNetstat = Get-NetstatListeningPids -Port $Port
-    if ($stillListening -or ($stillNetstat -and $stillNetstat.Count -gt 0)) {
+
+    $stillListenerPids = @(
+        $stillListening | ForEach-Object { $_.OwningProcess } | Where-Object { $_ -and ([int]$_) -gt 0 } | Select-Object -Unique
+    )
+    $stillLive = @($stillListenerPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+
+    if ($stillLive.Count -gt 0 -or ($stillNetstat -and $stillNetstat.Count -gt 0)) {
         Write-Warning "Port $Port remains busy after $MaxAttempts attempts."
         return $false
     }

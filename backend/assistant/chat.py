@@ -12,11 +12,17 @@ import requests
 
 from backend.assistant.tools import ToolCall, ToolFn, ToolResult
 from backend.assistant.tools import (
+    tool_create_bot,
+    tool_get_backtest_results,
     tool_get_commands_log,
     tool_get_data_summary,
     tool_get_market_metrics,
     tool_get_monitor_status,
+    tool_get_optimize_results,
+    tool_get_perf_summary,
     tool_get_state,
+    tool_run_backtest,
+    tool_run_optimize,
     tool_swarm_rank,
 )
 from backend.database import SessionLocal
@@ -146,16 +152,29 @@ def _contains_order_intent(text: str) -> bool:
 
 
 def _system_prompt() -> str:
-    return (
+    base = (
         "Eres Wyckoff Doctor Trader: español natural, directo, sin humo, mentalidad de trader profesional.\n"
         "Prioridad: diagnóstico operativo + gestión de riesgo.\n"
         "Regla de oro: NO ejecutas órdenes, NO envías comandos, NO cambias execution mode.\n"
         "Si el usuario pide ejecutar/operar: responde que no ejecutas órdenes y entrega pasos manuales concretos.\n"
         "Nunca inventes datos. Si falta info, pide usar herramientas (tools) o dilo explícitamente.\n"
+        "Anti-invención (mercado): si `source` != LIVE_WS o `feed_status` in {STALE, NO_LIVE} -> `confidence=low`.\n"
+        "En ese caso NO afirmes tendencia/señales; explica el porqué con `ws_age_sec`, `bar_age_sec`, `ws_stale_sec`, `bar_stale_sec` y cita `notes`.\n"
+        "Formato de respuesta para preguntas de mercado:\n"
+        "- 1) Market snapshot (2-3 líneas): `symbol`, `timeframe`, `feed_status`, `confidence`, `last_bar_ts_utc`, `ws_age_sec`, `bar_age_sec`.\n"
+        "- 2) Razón de frescura: si no está LIVE, incluye `notes` relevantes con números.\n"
+        "- 3) Recién después: análisis / próximos pasos.\n"
         "Cuando el usuario pregunte “qué pasa”, primero resume el estado operativo basado en el snapshot/tools:\n"
         "nt_mode, mode, feed_status, data_source, ws_age, bar_age, última barra (ts), posición/órdenes si están disponibles.\n"
         "Luego: (1) diagnóstico, (2) causa probable, (3) próximos pasos concretos.\n"
     )
+    base += (
+        "\n"
+        "Bot Factory v1:\n"
+        "- Si el usuario pide crear/modificar un bot, SOLO produces BotSpec v1 (JSON schema cerrado). No generas cÇüdigo.\n"
+        "- Puedes ejecutar backtests/optimizaciÇün deterministas con tools y reportar mÇ¸tricas reales.\n"
+    )
+    return base
 
 
 def _tool_registry() -> Dict[str, ToolFn]:
@@ -166,6 +185,12 @@ def _tool_registry() -> Dict[str, ToolFn]:
         "tool_get_data_summary": tool_get_data_summary,
         "tool_swarm_rank": tool_swarm_rank,
         "tool_get_market_metrics": tool_get_market_metrics,
+        "tool_create_bot": tool_create_bot,
+        "tool_run_backtest": tool_run_backtest,
+        "tool_get_backtest_results": tool_get_backtest_results,
+        "tool_run_optimize": tool_run_optimize,
+        "tool_get_optimize_results": tool_get_optimize_results,
+        "tool_get_perf_summary": tool_get_perf_summary,
     }
 
 
@@ -257,6 +282,75 @@ def _tool_schemas() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_create_bot",
+                "description": "Create/update a bot from a strict BotSpec v1 JSON (no code).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"spec": {"type": "object"}},
+                    "required": ["spec"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_run_backtest",
+                "description": "Run a deterministic backtest for a stored botId.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "botId": {"type": "string"},
+                        "startDay": {"type": "string", "description": "YYYY-MM-DD"},
+                        "endDay": {"type": "string", "description": "YYYY-MM-DD"},
+                    },
+                    "required": ["botId", "startDay", "endDay"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_get_backtest_results",
+                "description": "Fetch backtest results by runId.",
+                "parameters": {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_run_optimize",
+                "description": "Run a capped optimization grid (<=50 variants) for a stored botId.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "botId": {"type": "string"},
+                        "startDay": {"type": "string", "description": "YYYY-MM-DD"},
+                        "endDay": {"type": "string", "description": "YYYY-MM-DD"},
+                        "grid": {"type": "object"},
+                    },
+                    "required": ["botId", "startDay", "endDay", "grid"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_get_optimize_results",
+                "description": "Fetch optimization results by runId.",
+                "parameters": {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_get_perf_summary",
+                "description": "Fetch latest performance summary for a botId.",
+                "parameters": {"type": "object", "properties": {"botId": {"type": "string"}}, "required": ["botId"]},
+            },
+        },
     ]
 
 
@@ -342,12 +436,18 @@ def _build_snapshot(*, bot_id: str) -> Tuple[Dict[str, Any], List[ToolResult], L
         base = (metrics.get("base") or {}) if isinstance(metrics, dict) else {}
         wy = (metrics.get("wyckoff") or {}) if isinstance(metrics, dict) else {}
         tr = (metrics.get("trend_pullback") or {}) if isinstance(metrics, dict) else {}
+        last_bar_ts_utc = m.get("last_bar_ts_utc")
+        if not last_bar_ts_utc:
+            last_bar_ts_utc = (m.get("timestamps") or {}).get("last_bar_ts_utc") if isinstance(m.get("timestamps"), dict) else None
         return {
             "source": m.get("source"),
             "feed_status": m.get("feed_status"),
             "confidence": m.get("confidence"),
-            "ages": m.get("ages"),
-            "last_bar_ts_utc": (m.get("timestamps") or {}).get("last_bar_ts_utc") if isinstance(m.get("timestamps"), dict) else None,
+            "ws_age_sec": m.get("ws_age_sec") if "ws_age_sec" in m else (m.get("ages") or {}).get("ws_age_sec"),
+            "bar_age_sec": m.get("bar_age_sec") if "bar_age_sec" in m else (m.get("ages") or {}).get("bar_age_sec"),
+            "ws_stale_sec": m.get("ws_stale_sec") if "ws_stale_sec" in m else (m.get("thresholds") or {}).get("ws_stale_sec"),
+            "bar_stale_sec": m.get("bar_stale_sec") if "bar_stale_sec" in m else (m.get("thresholds") or {}).get("bar_stale_sec"),
+            "last_bar_ts_utc": last_bar_ts_utc,
             "base": {
                 "last_price": base.get("last_price"),
                 "atr_14_ticks": base.get("atr_14_ticks"),

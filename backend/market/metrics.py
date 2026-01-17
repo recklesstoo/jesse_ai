@@ -315,6 +315,7 @@ def compute_market_metrics_v1(
     symbol: str,
     timeframe: str,
     ws_age_sec: Optional[float],
+    bar_age_sec_override: Optional[float] = None,
     last_ws_ts_utc: Optional[str],
     ws_stale_sec: float = 10.0,
     lookback: int,
@@ -326,10 +327,28 @@ def compute_market_metrics_v1(
     tick_size = spec.tick_size
 
     tf_sec = timeframe_seconds(timeframe)
-    bar_stale_sec = float(max(1.5 * tf_sec, 90))
+    # v1 contract: explicit stale thresholds for the assistant.
+    if timeframe == "1m":
+        bar_stale_sec = 90.0
+    elif timeframe == "5m":
+        bar_stale_sec = 450.0
+    else:
+        bar_stale_sec = float(max(1.5 * tf_sec, 90))
+
+    def _freshness_note(*, ws_age: Optional[float], bar_age: Optional[float]) -> str:
+        ws_age_s = "null" if ws_age is None else f"{float(ws_age):.3f}"
+        bar_age_s = "null" if bar_age is None else f"{float(bar_age):.3f}"
+        return (
+            "freshness:"
+            f" ws_age_sec={ws_age_s}"
+            f" bar_age_sec={bar_age_s}"
+            f" ws_stale_sec={float(ws_stale_sec):.3f}"
+            f" bar_stale_sec={float(bar_stale_sec):.3f}"
+        )
 
     if not bars:
         notes.append("no bars available in memory buffer")
+        notes.append(_freshness_note(ws_age=ws_age_sec, bar_age=None))
         resp = {
             "version": "market-metrics.v1",
             "symbol": symbol,
@@ -338,6 +357,14 @@ def compute_market_metrics_v1(
             "source": "NO_LIVE",
             "feed_status": "NO_LIVE",
             "confidence": "low",
+            # Top-level v1 contract fields (duplicated in nested dicts for compatibility):
+            "server_ts_utc": now_utc.isoformat().replace("+00:00", "Z"),
+            "last_ws_ts_utc": last_ws_ts_utc,
+            "last_bar_ts_utc": None,
+            "ws_age_sec": ws_age_sec,
+            "bar_age_sec": None,
+            "ws_stale_sec": ws_stale_sec,
+            "bar_stale_sec": bar_stale_sec,
             "timestamps": {
                 "server_ts_utc": now_utc.isoformat().replace("+00:00", "Z"),
                 "last_ws_ts_utc": last_ws_ts_utc,
@@ -348,10 +375,20 @@ def compute_market_metrics_v1(
             "availability": {"bars": False, "quotes": False, "orderflow": False},
             "instrument": {"tick_size": tick_size, "tick_value_usd": spec.tick_value_usd},
             "metrics": {
-                "base": {"last_price": 0, "true_range_last_ticks": 0, "atr_14_ticks": 0, "bid": None, "ask": None, "spread_ticks": None},
-                "wyckoff": {"effort_result": 0, "rvol_20": 0, "vol_zscore_50": 0, "events": {"climax_bar": None, "sweep": None, "spring_upthrust": None}},
-                "trend_pullback": {"linreg_r2_50": 0, "linreg_slope_50_atr_norm": 0, "swings": {"highs": [], "lows": []}, "bos_mss_last": None},
-                "sessions": {"session_id": "ETH", "session_open": 0, "session_high": 0, "session_low": 0, "prev_day_high": 0, "prev_day_low": 0, "prev_day_close": 0, "opening_range_15m": {"high": 0, "low": 0}},
+                "base": {
+                    "last_price": None,
+                    "ohlc": {"open": None, "high": None, "low": None, "close": None},
+                    "volume": None,
+                    "bar_ts_utc": None,
+                    "true_range_last_ticks": None,
+                    "atr_14_ticks": None,
+                    "bid": None,
+                    "ask": None,
+                    "spread_ticks": None,
+                },
+                "wyckoff": {"effort_result": None, "rvol_20": None, "vol_zscore_50": None, "events": {"climax_bar": None, "sweep": None, "spring_upthrust": None}},
+                "trend_pullback": {"linreg_r2_50": None, "linreg_slope_50_atr_norm": None, "swings": {"highs": [], "lows": []}, "bos_mss_last": None},
+                "sessions": {"session_id": None, "session_open": None, "session_high": None, "session_low": None, "prev_day_high": None, "prev_day_low": None, "prev_day_close": None, "opening_range_15m": {"high": None, "low": None}},
                 "fvg": {"nearest_above": None, "nearest_below": None, "unfilled_above_count": 0, "unfilled_below_count": 0, "last_fill_event": None},
             },
             "bars_preview": [],
@@ -383,12 +420,15 @@ def compute_market_metrics_v1(
 
     last = cleaned[-1]
     last_bar_ts_utc = last.ts_utc.isoformat().replace("+00:00", "Z")
-    bar_age_sec = float(max(0.0, (now_utc - last.ts_utc).total_seconds()))
+    if bar_age_sec_override is not None:
+        bar_age_sec = float(max(0.0, float(bar_age_sec_override)))
+    else:
+        bar_age_sec = float(max(0.0, (now_utc - last.ts_utc).total_seconds()))
 
     feed_ok = True
     if ws_age_sec is None:
         feed_ok = False
-        notes.append("ws_age_sec unavailable")
+        notes.append(_freshness_note(ws_age=None, bar_age=bar_age_sec))
     else:
         if float(ws_age_sec) > float(ws_stale_sec):
             feed_ok = False
@@ -400,6 +440,7 @@ def compute_market_metrics_v1(
     confidence = "high"
     if not feed_ok:
         confidence = "low"
+        notes.append(_freshness_note(ws_age=ws_age_sec, bar_age=bar_age_sec))
     elif len(cleaned) < 60:
         confidence = "medium" if len(cleaned) >= 30 else "low"
         notes.append(f"short lookback for stable stats (have={len(cleaned)} need>=60)")
@@ -534,8 +575,16 @@ def compute_market_metrics_v1(
         "timeframe": timeframe,
         "lookback": lookback,
         "source": "LIVE_WS",
-        "feed_status": "OK" if feed_ok else "STALE",
+        "feed_status": "LIVE" if feed_ok else "STALE",
         "confidence": confidence,
+        # Top-level v1 contract fields (duplicated in nested dicts for compatibility):
+        "server_ts_utc": now_utc.isoformat().replace("+00:00", "Z"),
+        "last_ws_ts_utc": last_ws_ts_utc,
+        "last_bar_ts_utc": last_bar_ts_utc,
+        "ws_age_sec": ws_age_sec,
+        "bar_age_sec": round(bar_age_sec, 3),
+        "ws_stale_sec": ws_stale_sec,
+        "bar_stale_sec": bar_stale_sec,
         "timestamps": {
             "server_ts_utc": now_utc.isoformat().replace("+00:00", "Z"),
             "last_ws_ts_utc": last_ws_ts_utc,
@@ -548,6 +597,9 @@ def compute_market_metrics_v1(
         "metrics": {
             "base": {
                 "last_price": last_price,
+                "ohlc": {"open": float(last.open), "high": float(last.high), "low": float(last.low), "close": float(last.close)},
+                "volume": int(last.volume),
+                "bar_ts_utc": last_bar_ts_utc,
                 "bid": last.bid,
                 "ask": last.ask,
                 "spread_ticks": spread_ticks,

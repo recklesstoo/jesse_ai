@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
 from fastapi import FastAPI
@@ -8,12 +9,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import init_shadow_db
 from backend.database import Base, engine, ensure_schema, PROJECT_ROOT
+from backend.ops.ws_watchdog import run_ws_watchdog
 from backend.routers.health import router as health_router
 from backend.routers.execution import router as execution_router
 from backend.routers.ai import router as ai_router
 from backend.routers.data_manager import router as data_manager_router
 from backend.routers.market import router as market_router
 from backend.routers.ops import router as ops_router
+from backend.routers.training import router as training_router
+from backend.routers.backtest import router as backtest_router
+from backend.routers.bot_factory import router as bot_factory_router
 from backend.ws.server import (
     compute_wyckoff_signal as _compute_wyckoff_signal,
     ws_bot,
@@ -43,7 +48,22 @@ from backend.compat import (
     live_ws_connections as compat_live_ws_connections,
 )
 
-app = FastAPI(title="Wyckoff AI Lab Backend", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    ensure_schema()
+    init_shadow_db()
+    stop_event = asyncio.Event()
+    watchdog_task = asyncio.create_task(run_ws_watchdog(stop_event))
+    yield
+    stop_event.set()
+    try:
+        await asyncio.wait_for(watchdog_task, timeout=2.0)
+    except Exception:
+        watchdog_task.cancel()
+
+
+app = FastAPI(title="Wyckoff AI Lab Backend", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,12 +79,9 @@ app.include_router(ai_router)
 app.include_router(data_manager_router)
 app.include_router(market_router)
 app.include_router(ops_router)
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    Base.metadata.create_all(bind=engine)
-    ensure_schema()
-    init_shadow_db()
+app.include_router(training_router)
+app.include_router(backtest_router)
+app.include_router(bot_factory_router)
 
 app.websocket("/ws/live")(ws_live)
 app.websocket("/ws/{bot_id}")(ws_bot)

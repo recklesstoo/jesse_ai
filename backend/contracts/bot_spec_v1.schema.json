@@ -1,0 +1,213 @@
+﻿{
+  "$defs": {
+    "BotSpecV1Gates": {
+      "additionalProperties": false,
+      "properties": {
+        "min_confidence": {
+          "default": 0.1,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Confidence",
+          "type": "number"
+        },
+        "min_atr_ticks": {
+          "default": 6,
+          "maximum": 500,
+          "minimum": 0,
+          "title": "Min Atr Ticks",
+          "type": "integer"
+        },
+        "cooldown_bars": {
+          "default": 2,
+          "maximum": 500,
+          "minimum": 0,
+          "title": "Cooldown Bars",
+          "type": "integer"
+        },
+        "max_trades_per_session": {
+          "default": 20,
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Max Trades Per Session",
+          "type": "integer"
+        }
+      },
+      "title": "BotSpecV1Gates",
+      "type": "object"
+    },
+    "BotSpecV1Risk": {
+      "additionalProperties": false,
+      "properties": {
+        "qty": {
+          "default": 1,
+          "maximum": 200,
+          "minimum": 1,
+          "title": "Qty",
+          "type": "integer"
+        },
+        "stop_loss_ticks": {
+          "default": 10,
+          "maximum": 500,
+          "minimum": 0,
+          "title": "Stop Loss Ticks",
+          "type": "integer"
+        },
+        "take_profit_ticks": {
+          "default": 12,
+          "maximum": 500,
+          "minimum": 0,
+          "title": "Take Profit Ticks",
+          "type": "integer"
+        },
+        "max_loss_usd": {
+          "default": 1200.0,
+          "maximum": 100000.0,
+          "minimum": 0.0,
+          "title": "Max Loss Usd",
+          "type": "number"
+        }
+      },
+      "title": "BotSpecV1Risk",
+      "type": "object"
+    },
+    "BotSpecV1Session": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "RTH",
+          "enum": [
+            "RTH",
+            "ETH",
+            "BOTH"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "tz": {
+          "default": "America/New_York",
+          "title": "Tz",
+          "type": "string"
+        },
+        "start_hhmm": {
+          "default": 930,
+          "maximum": 2359,
+          "minimum": 0,
+          "title": "Start Hhmm",
+          "type": "integer"
+        },
+        "end_hhmm": {
+          "default": 1600,
+          "maximum": 2359,
+          "minimum": 0,
+          "title": "End Hhmm",
+          "type": "integer"
+        }
+      },
+      "title": "BotSpecV1Session",
+      "type": "object"
+    },
+    "BotSpecV1SetupTrendPullbackBos": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "trend_pullback_bos",
+          "default": "trend_pullback_bos",
+          "title": "Kind",
+          "type": "string"
+        },
+        "ema_trend_len": {
+          "default": 200,
+          "maximum": 300,
+          "minimum": 10,
+          "title": "Ema Trend Len",
+          "type": "integer"
+        },
+        "ema_pullback_len": {
+          "default": 20,
+          "maximum": 200,
+          "minimum": 5,
+          "title": "Ema Pullback Len",
+          "type": "integer"
+        },
+        "bos_lookback": {
+          "default": 10,
+          "maximum": 50,
+          "minimum": 2,
+          "title": "Bos Lookback",
+          "type": "integer"
+        }
+      },
+      "title": "BotSpecV1SetupTrendPullbackBos",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Closed schema used by the assistant and APIs.\nThe LLM may only output this JSON (no free-form code).",
+  "properties": {
+    "version": {
+      "const": "bot-spec.v1",
+      "default": "bot-spec.v1",
+      "title": "Version",
+      "type": "string"
+    },
+    "botId": {
+      "title": "Botid",
+      "type": "string"
+    },
+    "name": {
+      "default": "WyckoffBot",
+      "title": "Name",
+      "type": "string"
+    },
+    "symbol": {
+      "default": "MNQ",
+      "title": "Symbol",
+      "type": "string"
+    },
+    "timeframe": {
+      "default": "1m",
+      "enum": [
+        "1m",
+        "5m"
+      ],
+      "title": "Timeframe",
+      "type": "string"
+    },
+    "session": {
+      "$ref": "#/$defs/BotSpecV1Session"
+    },
+    "risk": {
+      "$ref": "#/$defs/BotSpecV1Risk"
+    },
+    "gates": {
+      "$ref": "#/$defs/BotSpecV1Gates"
+    },
+    "setup": {
+      "$ref": "#/$defs/BotSpecV1SetupTrendPullbackBos"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Notes"
+    }
+  },
+  "required": [
+    "botId"
+  ],
+  "title": "BotSpecV1",
+  "type": "object"
+}

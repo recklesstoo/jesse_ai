@@ -110,7 +110,7 @@ Write-Host "Compiling backend modules..."
 Write-Host "Installing frontend packages..."
 Push-Location (Join-Path $RepoRoot "frontend")
 try {
-    & npm install
+    & npm install --no-fund --no-audit
 } finally {
     Pop-Location
 }
@@ -208,8 +208,8 @@ function Invoke-FeedStatusCheck {
             $state = Invoke-RestMethod -Uri "http://127.0.0.1:$BackendPort/api/v1/state?botId=bot-1" -Method Get -TimeoutSec 5 -UseBasicParsing
             $status = ($state.feed_status | ForEach-Object { "$_" }).ToUpperInvariant()
 
-            if ($status -eq "NO_FEED") {
-                Write-Warning "WS server OK, no Ninja feed yet (feed_status=NO_FEED)."
+            if ($status -eq "NO_LIVE" -or $status -eq "NO_FEED") {
+                Write-Warning "WS server OK, no Ninja feed yet (feed_status=$status)."
                 return @{ ok = $true; live = $false; state = $state }
             }
 
@@ -224,14 +224,16 @@ function Invoke-FeedStatusCheck {
                 }
                 $age = $state.bar_age_sec
                 $maxAge = [double]$MaxLiveBarAgeSec
-                if ($state.feed_stale_sec -ne $null) {
+                if ($state.bar_stale_sec -ne $null) {
+                    try { $maxAge = [double]$state.bar_stale_sec } catch { }
+                } elseif ($state.feed_stale_sec -ne $null) {
                     try { $maxAge = [double]$state.feed_stale_sec } catch { }
                 }
                 if ($age -ne $null -and [double]$age -le $maxAge) {
-                    Write-Host "Ninja feed LIVE (bar_age_sec=$age, feed_stale_sec=$maxAge)."
+                    Write-Host "Ninja feed LIVE (bar_age_sec=$age, bar_stale_sec=$maxAge)."
                     return @{ ok = $true; live = $true; state = $state }
                 }
-                Write-Warning "Feed reported LIVE but stale (attempt $i): bar_age_sec=$age (feed_stale_sec=$maxAge)"
+                Write-Warning "Feed reported LIVE but stale (attempt $i): bar_age_sec=$age (bar_stale_sec=$maxAge)"
             } elseif ($status -eq "STALE") {
                 $age = $state.bar_age_sec
                 Write-Warning "Ninja feed is STALE (bar_age_sec=$age)."
@@ -273,7 +275,7 @@ function Has-RecentLogIssues {
 function Start-Attempt {
     Stop-Services
     foreach ($port in @($BackendPort, $FrontendPort)) {
-        Release-Port -Port $port -MaxAttempts 20 -DelayMs $PortWaitDelayMs
+        Release-Port -Port $port -MaxAttempts 20 -DelayMs $PortWaitDelayMs | Out-Null
     }
     Write-Host "Starting backend and frontend via arranque..."
     & $ArranqueScript -BackendPort $BackendPort -FrontendPort $FrontendPort -MaxAttempts 20 -DelayMs $PortWaitDelayMs
@@ -281,14 +283,14 @@ function Start-Attempt {
 
 function Restart-Backend {
     Stop-RecordedProcess -PidFile (Join-Path $LogsRoot "backend_pid.txt") -Label "backend"
-    Release-Port -Port $BackendPort -MaxAttempts 20 -DelayMs $PortWaitDelayMs
+    Release-Port -Port $BackendPort -MaxAttempts 20 -DelayMs $PortWaitDelayMs | Out-Null
     Write-Host "Restarting backend via arranque..."
     & $ArranqueScript -BackendPort $BackendPort -FrontendPort $FrontendPort -BackendOnly -MaxAttempts 20 -DelayMs $PortWaitDelayMs
 }
 
 function Restart-Frontend {
     Stop-RecordedProcess -PidFile (Join-Path $LogsRoot "frontend_pid.txt") -Label "frontend"
-    Release-Port -Port $FrontendPort -MaxAttempts 20 -DelayMs $PortWaitDelayMs
+    Release-Port -Port $FrontendPort -MaxAttempts 20 -DelayMs $PortWaitDelayMs | Out-Null
     Write-Host "Restarting frontend via arranque..."
     & $ArranqueScript -BackendPort $BackendPort -FrontendPort $FrontendPort -FrontendOnly -MaxAttempts 20 -DelayMs $PortWaitDelayMs
 }

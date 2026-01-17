@@ -19,6 +19,8 @@ class MarketBar:
     volume: int
     bid: Optional[float] = None
     ask: Optional[float] = None
+    # Server receive timestamp (UTC). Optional, but used for staleness computations.
+    rx_ts_utc: Optional[datetime] = None
 
 
 def normalize_timeframe(value: Any) -> str:
@@ -69,6 +71,24 @@ class MarketRing:
     def append(self, bar: MarketBar) -> None:
         self._dq.append(bar)
 
+    def upsert(self, bar: MarketBar) -> None:
+        """
+        Append a new bar, but if the last bar shares the same ts_utc, replace it.
+
+        Bridge/Ninja can send partial updates for the same bar timestamp. For market metrics
+        determinism (and memory safety), treat same-ts updates as replacements.
+        """
+        try:
+            last = self._dq[-1]
+        except Exception:
+            last = None
+        if last is not None and last.ts_utc == bar.ts_utc:
+            try:
+                self._dq.pop()
+            except Exception:
+                pass
+        self._dq.append(bar)
+
     def tail(self, n: int) -> List[MarketBar]:
         if n <= 0:
             return []
@@ -96,6 +116,11 @@ class MarketBuffer:
         self._lock = Lock()
         self._rings: Dict[Tuple[str, str], MarketRing] = {}
         self._partials: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._last_rx_utc: Dict[Tuple[str, str], datetime] = {}
+        # Track which input timeframes have been observed per symbol.
+        # This lets us avoid double-producing 5m bars if Ninja already sends real 5m bars,
+        # and prefer higher-resolution inputs (e.g., 1s) for aggregation.
+        self._has_input_tf: Dict[Tuple[str, str], bool] = {}
 
     def _bucket_start(self, ts_utc: datetime, target_tf: str) -> datetime:
         if ts_utc.tzinfo is None:
@@ -124,6 +149,7 @@ class MarketBuffer:
                 volume=int(part.get("volume") or 0),
                 bid=part.get("bid"),
                 ask=part.get("ask"),
+                rx_ts_utc=part.get("last_rx_utc"),
             )
         )
 
@@ -139,6 +165,8 @@ class MarketBuffer:
         symbol = bar.symbol.upper()
         bucket = self._bucket_start(bar.ts_utc, target_tf)
         key = (symbol, target_tf)
+        rx_ts = bar.rx_ts_utc or datetime.now(timezone.utc)
+        self._last_rx_utc[key] = rx_ts
         part = self._partials.get(key)
         if part is None or part.get("bucket_start") != bucket:
             if part is not None:
@@ -152,6 +180,7 @@ class MarketBuffer:
                 "volume": bar.volume,
                 "bid": bar.bid,
                 "ask": bar.ask,
+                "last_rx_utc": rx_ts,
             }
             self._partials[key] = part
             return
@@ -162,11 +191,15 @@ class MarketBuffer:
         part["volume"] = int(part.get("volume") or 0) + int(bar.volume or 0)
         part["bid"] = bar.bid
         part["ask"] = bar.ask
+        part["last_rx_utc"] = rx_ts
 
     def add_bar(self, bar: MarketBar) -> None:
         with self._lock:
             symbol = bar.symbol.upper()
             tf = normalize_timeframe(bar.timeframe)
+            rx_ts = bar.rx_ts_utc or datetime.now(timezone.utc)
+            if tf:
+                self._has_input_tf[(symbol, tf)] = True
             normalized = MarketBar(
                 ts_utc=bar.ts_utc.astimezone(timezone.utc) if bar.ts_utc.tzinfo else bar.ts_utc.replace(tzinfo=timezone.utc),
                 symbol=symbol,
@@ -178,13 +211,24 @@ class MarketBuffer:
                 volume=int(bar.volume),
                 bid=bar.bid,
                 ask=bar.ask,
+                rx_ts_utc=rx_ts,
             )
-            self._ensure_ring(symbol, tf).append(normalized)
+            self._ensure_ring(symbol, tf).upsert(normalized)
+            self._last_rx_utc[(symbol, tf)] = rx_ts
 
             # v1 aggregation: if we receive 1s bars, build 1m and 5m bars for metrics.
             if tf == "1s":
                 self._aggregate_tick_bar(normalized, "1m")
                 self._aggregate_tick_bar(normalized, "5m")
+                return
+
+            # If we receive 1m bars (common setup), optionally build 5m bars.
+            # Avoid double-counting if a higher-resolution input exists (1s) or real 5m is present.
+            if tf == "1m":
+                has_1s = bool(self._has_input_tf.get((symbol, "1s")))
+                has_5m = bool(self._has_input_tf.get((symbol, "5m")))
+                if not has_1s and not has_5m:
+                    self._aggregate_tick_bar(normalized, "5m")
 
     def get_bars(self, *, symbol: str, timeframe: str, limit: int) -> List[MarketBar]:
         key = (str(symbol).upper(), normalize_timeframe(timeframe))
@@ -202,6 +246,16 @@ class MarketBuffer:
             if last is None:
                 return None
             ts = last.ts_utc
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts.astimezone(timezone.utc)
+
+    def last_rx_ts(self, *, symbol: str, timeframe: str) -> Optional[datetime]:
+        key = (str(symbol).upper(), normalize_timeframe(timeframe))
+        with self._lock:
+            ts = self._last_rx_utc.get(key)
+            if ts is None:
+                return None
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             return ts.astimezone(timezone.utc)

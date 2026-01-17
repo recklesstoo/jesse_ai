@@ -94,6 +94,42 @@ namespace NinjaTrader.NinjaScript.Strategies
                 + "}";
             }
 
+            public static string BuildAckV2(string botId, long seq, string id, string status, string message, string sendTsUtc, Cmd cmd = null)
+            {
+                string details = "";
+                if (cmd != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(cmd.Action))
+                        details += ",\"action\":\"" + Escape(cmd.Action) + "\"";
+                    if (cmd.Qty > 0)
+                        details += ",\"qty\":" + cmd.Qty.ToString(CultureInfo.InvariantCulture);
+                    if (cmd.SlTicks > 0)
+                        details += ",\"slTicks\":" + cmd.SlTicks.ToString(CultureInfo.InvariantCulture);
+                    if (cmd.TpTicks > 0)
+                        details += ",\"tpTicks\":" + cmd.TpTicks.ToString(CultureInfo.InvariantCulture);
+                    if (!string.IsNullOrWhiteSpace(cmd.Tag))
+                        details += ",\"tag\":\"" + Escape(cmd.Tag) + "\"";
+                    if (!string.IsNullOrWhiteSpace(cmd.Symbol))
+                        details += ",\"symbol\":\"" + Escape(cmd.Symbol) + "\"";
+                }
+
+                return "{"
+                    + "\"type\":\"ACK\","
+                    + "\"v\":2,"
+                    + "\"source\":\"NINJA_WS\","
+                    + "\"botId\":\"" + Escape(botId ?? "") + "\","
+                    + "\"seq\":" + seq.ToString(CultureInfo.InvariantCulture) + ","
+                    + "\"send_ts_utc\":\"" + Escape(sendTsUtc) + "\","
+                    + "\"payload\":{"
+                        + "\"id\":\"" + Escape(id ?? "") + "\","
+                        + "\"status\":\"" + Escape(status ?? "") + "\","
+                        + "\"message\":\"" + Escape(message ?? "") + "\","
+                        + "\"ts\":\"" + Escape(sendTsUtc) + "\""
+                        + details
+                    + "}"
+                + "}";
+            }
+
             public static string BuildBar(string timestamp, string symbol, string timeframe,
                                           double o, double h, double l, double c, int vol, string mode)
             {
@@ -171,6 +207,93 @@ namespace NinjaTrader.NinjaScript.Strategies
                     + "}"
                 + "}";
             }
+
+            public static string BuildMonitorV2(
+                string botId, long seq, string sendTsUtc,
+                string ntMode, string wsState, string strategyState,
+                int outHiDepth, int outLoDepth, long outDropLo,
+                string lastBarObservedUtc, string lastBarSentUtc, string lastWsSendUtc,
+                double? observedAgeSec, double? sentAgeSec, double? wsSendAgeSec,
+                long sendCount, long skipCount,
+                bool execEnabled, bool isStrategyAnalyzer
+            )
+            {
+                string observedUtc = string.IsNullOrWhiteSpace(lastBarObservedUtc) ? "null" : "\"" + Escape(lastBarObservedUtc) + "\"";
+                string sentUtc = string.IsNullOrWhiteSpace(lastBarSentUtc) ? "null" : "\"" + Escape(lastBarSentUtc) + "\"";
+                string wsUtc = string.IsNullOrWhiteSpace(lastWsSendUtc) ? "null" : "\"" + Escape(lastWsSendUtc) + "\"";
+
+                string observedAge = observedAgeSec.HasValue ? observedAgeSec.Value.ToString("0.0", CultureInfo.InvariantCulture) : "null";
+                string sentAge = sentAgeSec.HasValue ? sentAgeSec.Value.ToString("0.0", CultureInfo.InvariantCulture) : "null";
+                string wsAge = wsSendAgeSec.HasValue ? wsSendAgeSec.Value.ToString("0.0", CultureInfo.InvariantCulture) : "null";
+
+                return "{"
+                    + "\"type\":\"MONITOR\","
+                    + "\"v\":2,"
+                    + "\"source\":\"NINJA_WS\","
+                    + "\"botId\":\"" + Escape(botId ?? "") + "\","
+                    + "\"seq\":" + seq.ToString(CultureInfo.InvariantCulture) + ","
+                    + "\"send_ts_utc\":\"" + Escape(sendTsUtc) + "\","
+                    + "\"payload\":{"
+                        + "\"ts\":\"" + Escape(sendTsUtc) + "\","
+                        + "\"nt_mode\":\"" + Escape(ntMode ?? "") + "\","
+                        + "\"wsState\":\"" + Escape(wsState ?? "") + "\","
+                        + "\"strategyState\":\"" + Escape(strategyState ?? "") + "\","
+                        + "\"outHiDepth\":" + outHiDepth.ToString(CultureInfo.InvariantCulture) + ","
+                        + "\"outLoDepth\":" + outLoDepth.ToString(CultureInfo.InvariantCulture) + ","
+                        + "\"outDropLo\":" + outDropLo.ToString(CultureInfo.InvariantCulture) + ","
+                        + "\"lastBarObservedUtc\":" + observedUtc + ","
+                        + "\"lastBarSentUtc\":" + sentUtc + ","
+                        + "\"lastWsSendUtc\":" + wsUtc + ","
+                        + "\"observedAgeSec\":" + observedAge + ","
+                        + "\"sentAgeSec\":" + sentAge + ","
+                        + "\"wsSendAgeSec\":" + wsAge + ","
+                        + "\"sendCount\":" + sendCount.ToString(CultureInfo.InvariantCulture) + ","
+                        + "\"skipCount\":" + skipCount.ToString(CultureInfo.InvariantCulture) + ","
+                        + "\"exec_enabled\":" + (execEnabled ? "true" : "false") + ","
+                        + "\"is_strategy_analyzer\":" + (isStrategyAnalyzer ? "true" : "false")
+                    + "}"
+                + "}";
+            }
+
+            public static string BuildBarDataV2(
+                string botId,
+                long seq,
+                string sendTsUtc,
+                string barTsUtc,
+                string symbol,
+                string timeframe,
+                double o, double h, double l, double c,
+                long vol,
+                string ntMode,
+                bool execEnabled,
+                bool isStrategyAnalyzer,
+                int barsInProgress
+            )
+            {
+                return "{"
+                    + "\"type\":\"BAR_DATA\","
+                    + "\"v\":2,"
+                    + "\"source\":\"NINJA_WS\","
+                    + "\"botId\":\"" + Escape(botId ?? "") + "\","
+                    + "\"seq\":" + seq.ToString(CultureInfo.InvariantCulture) + ","
+                    + "\"send_ts_utc\":\"" + Escape(sendTsUtc) + "\","
+                    + "\"payload\":{"
+                        + "\"bar_ts_utc\":\"" + Escape(barTsUtc) + "\","
+                        + "\"timestamp\":\"" + Escape(barTsUtc) + "\","
+                        + "\"symbol\":\"" + Escape(symbol ?? "") + "\","
+                        + "\"timeframe\":\"" + Escape(timeframe ?? "") + "\","
+                        + "\"open\":" + o.ToString("R", CultureInfo.InvariantCulture) + ","
+                        + "\"high\":" + h.ToString("R", CultureInfo.InvariantCulture) + ","
+                        + "\"low\":" + l.ToString("R", CultureInfo.InvariantCulture) + ","
+                        + "\"close\":" + c.ToString("R", CultureInfo.InvariantCulture) + ","
+                        + "\"volume\":" + vol.ToString(CultureInfo.InvariantCulture) + ","
+                        + "\"nt_mode\":\"" + Escape(ntMode ?? "") + "\","
+                        + "\"exec_enabled\":" + (execEnabled ? "true" : "false") + ","
+                        + "\"is_strategy_analyzer\":" + (isStrategyAnalyzer ? "true" : "false") + ","
+                        + "\"bars_in_progress\":" + barsInProgress.ToString(CultureInfo.InvariantCulture)
+                    + "}"
+                + "}";
+            }
         }
 
         private class Cmd
@@ -189,25 +312,34 @@ namespace NinjaTrader.NinjaScript.Strategies
         private ClientWebSocket _ws;
         private CancellationTokenSource _cts;
         private Task _wsWorker;
+
         private readonly ConcurrentQueue<Cmd> _cmdQueue = new ConcurrentQueue<Cmd>();
         private readonly HashSet<string> _processed = new HashSet<string>();
         private readonly Queue<string> _processedOrder = new Queue<string>();
         private const int MAX_PROCESSED = 5000;
+
+        // Outbound queues (priority)
+        // - High: ACK / MONITOR / TRADE_EVENT
+        // - Low:  BAR_DATA (droppable under congestion)
+        private readonly ConcurrentQueue<string> _outHi = new ConcurrentQueue<string>();
+        private readonly ConcurrentQueue<string> _outLo = new ConcurrentQueue<string>();
+        private readonly SemaphoreSlim _outSignal = new SemaphoreSlim(0, int.MaxValue);
+        private int _outHiDepth = 0;
+        private int _outLoDepth = 0;
+        private long _outDropLo = 0;
+        private const int MAX_OUT_LO = 2000;
+        private const int MAX_OUT_HI = 500;
+        private const int SEND_LOOP_IDLE_MS = 250;
+
         private const int WS_RETRY_BASE_MS = 1000;
         private const int WS_RETRY_MAX_MS = 30000;
         private int _wsReconnectAttempt = 0;
-        private readonly SemaphoreSlim _wsSendLock = new SemaphoreSlim(1, 1);
 
-        private DateTime _lastSendTimeUtc = DateTime.MinValue;
-        private DateTime _lastBacktestSendUtc = DateTime.MinValue;
         private long _barSeq = 0;
         private int _lastVolumeValue = int.MinValue;
         private long _volumeWarnSeq = 0;
-        private const int LIVE_SEND_INTERVAL_MS = 50;
-        private const int BACKTEST_SEND_INTERVAL_MS = 1000;
+
         private int _liveBarsIndex = -1;
-        private Timer _backtestTimer;
-        private readonly object _backtestTimerLock = new object();
         private Timer _monitorTimer;
         private readonly object _monitorTimerLock = new object();
         private DateTime _lastMonitorUtc = DateTime.MinValue;
@@ -232,8 +364,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 EnableReceiveCommands = true;
                 EnableSendBars = true;
-                SendBarsInBacktest = true;
+                // Backtest/replay can flood; keep off by default.
+                SendBarsInBacktest = false;
                 EnableLiveExecution = false;
+                SendOnlyClosedBars = true;
 
                 DefaultQty = 1;
                 MaxContracts = 50;
@@ -268,28 +402,21 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.Historical)
             {
-                if (SendBarsInBacktest)
-                    StartBacktestTimer();
-                if (EnableSendBars && SendBarsInBacktest)
+                if ((EnableReceiveCommands || EnableSendBars) && SendBarsInBacktest)
                     StartWsWorker();
             }
             else if (State == State.Realtime)
             {
                 if (EnableLogging) Print("BridgePuppet -> Realtime");
 
-                if (EnableReceiveCommands)
+                if (EnableReceiveCommands || EnableSendBars)
                     StartWsWorker();
-
-                if (!EnableLiveExecution && SendBarsInBacktest)
-                    StartBacktestTimer();
-                else
-                    StopBacktestTimer();
             }
             else if (State == State.Terminated)
             {
                 try { _cts?.Cancel(); } catch { }
+                try { _ws?.Abort(); } catch { }
                 try { _ws?.Dispose(); } catch { }
-                StopBacktestTimer();
                 StopMonitorTimer();
 
                 if (EnableLogging) Print("BridgePuppet terminated");
@@ -303,53 +430,38 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private string CurrentMode()
         {
-            if (!EnableLiveExecution) return "BACKTEST";
             if (IsInStrategyAnalyzer) return "BACKTEST";
             if (State == State.Historical) return "BACKTEST";
-            return "LIVE";
+            if (State == State.Realtime) return "LIVE";
+            return "UNKNOWN";
         }
 
         protected override void OnBarUpdate()
         {
-            if (CurrentBars[BarsInProgress] < 1) return;
-
             int sendIndex = ResolveSendIndex();
             if (sendIndex < 0) return;
+            if (BarsInProgress == 0 && IsLiveNow() && IsFirstTickOfBar)
+                DrainQueue();
 
-            bool isNewBar = IsFirstTickOfBar;
+            if (BarsInProgress != sendIndex) return;
 
-            if (BarsInProgress == sendIndex)
-                _lastBarObservedUtc = DateTime.UtcNow;
+            bool live = IsLiveNow();
+            if (!live && !SendBarsInBacktest) return;
 
-            if (EnableSendBars && BarsInProgress == sendIndex)
+            // Send only on bar boundaries to avoid flooding and keep determinism.
+            if (!IsFirstTickOfBar)
             {
-                bool live = IsLiveNow() && EnableLiveExecution;
-                if (isNewBar)
-                    LogVolumeSnapshot(sendIndex);
-
-                bool shouldSend = false;
-                if (live)
-                    shouldSend = isNewBar || ShouldSendUpdate(ref _lastSendTimeUtc, LIVE_SEND_INTERVAL_MS);
-                else if (SendBarsInBacktest)
-                    shouldSend = isNewBar || ShouldSendUpdate(ref _lastBacktestSendUtc, BACKTEST_SEND_INTERVAL_MS);
-
-                if (shouldSend)
-                    SendBarOverWs(sendIndex);
-                else if (live || SendBarsInBacktest)
-                    Interlocked.Increment(ref _barSkipCount);
+                Interlocked.Increment(ref _barSkipCount);
+                return;
             }
 
-            if (BarsInProgress == 0 && IsLiveNow())
-                DrainQueue();
-        }
+            _lastBarObservedUtc = DateTime.UtcNow;
+            LogVolumeSnapshot(sendIndex);
 
-        private bool ShouldSendUpdate(ref DateTime lastSendUtc, int intervalMs)
-        {
-            var now = DateTime.UtcNow;
-            if ((now - lastSendUtc).TotalMilliseconds < intervalMs)
-                return false;
-            lastSendUtc = now;
-            return true;
+            int barsAgo = SendOnlyClosedBars ? 1 : 0;
+            if (CurrentBars[sendIndex] < (barsAgo + 1)) return;
+
+            SendBarOverWs(sendIndex, barsAgo);
         }
 
         private int ResolveSendIndex()
@@ -364,52 +476,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             return -1;
         }
 
-        private void StartBacktestTimer()
-        {
-            lock (_backtestTimerLock)
-            {
-                if (_backtestTimer != null) return;
-                _backtestTimer = new Timer(BACKTEST_SEND_INTERVAL_MS);
-                _backtestTimer.AutoReset = true;
-                _backtestTimer.Elapsed += OnBacktestTimerElapsed;
-                _backtestTimer.Start();
-            }
-        }
-
-        private void StopBacktestTimer()
-        {
-            lock (_backtestTimerLock)
-            {
-                if (_backtestTimer == null) return;
-                try
-                {
-                    _backtestTimer.Stop();
-                    _backtestTimer.Elapsed -= OnBacktestTimerElapsed;
-                    _backtestTimer.Dispose();
-                }
-                catch { }
-                _backtestTimer = null;
-            }
-        }
-
-        private void OnBacktestTimerElapsed(object sender, System.Timers.ElapsedEventArgs e)
-        {
-            if (IsLiveNow() || !SendBarsInBacktest) return;
-            try
-            {
-                TriggerCustomEvent(_ => BacktestHeartbeat(), null);
-            }
-            catch { }
-        }
-
-        private void BacktestHeartbeat()
-        {
-            if (IsLiveNow() || !SendBarsInBacktest) return;
-            int sendIndex = ResolveSendIndex();
-            if (sendIndex < 0) return;
-            if (!ShouldSendUpdate(ref _lastBacktestSendUtc, BACKTEST_SEND_INTERVAL_MS)) return;
-            SendBarOverWs(sendIndex);
-        }
+        // Backtest timer removed on purpose: historical/replay can flood.
 
         private void StartMonitorTimer()
         {
@@ -484,22 +551,32 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ? (double?)null
                 : (DateTime.UtcNow - _lastWsSendUtc).TotalSeconds;
 
-            Print("MONITOR mode=" + mode
-                + " state=" + State
-                + " ws=" + wsState
-                + " sendIndex=" + sendIndex.ToString(CultureInfo.InvariantCulture)
-                + " observedAgeSec=" + FormatAgeSeconds(_lastBarObservedUtc)
-                + " sentAgeSec=" + FormatAgeSeconds(_lastBarSentUtc)
-                + " wsSendAgeSec=" + FormatAgeSeconds(_lastWsSendUtc)
-                + " sendCount=" + _barSendCount.ToString(CultureInfo.InvariantCulture)
-                + " skipCount=" + _barSkipCount.ToString(CultureInfo.InvariantCulture));
+            if (EnableLogging)
+            {
+                Print("MONITOR mode=" + mode
+                    + " state=" + State
+                    + " ws=" + wsState
+                    + " sendIndex=" + sendIndex.ToString(CultureInfo.InvariantCulture)
+                    + " observedAgeSec=" + FormatAgeSeconds(_lastBarObservedUtc)
+                    + " sentAgeSec=" + FormatAgeSeconds(_lastBarSentUtc)
+                    + " wsSendAgeSec=" + FormatAgeSeconds(_lastWsSendUtc)
+                    + " sendCount=" + _barSendCount.ToString(CultureInfo.InvariantCulture)
+                    + " skipCount=" + _barSkipCount.ToString(CultureInfo.InvariantCulture)
+                    + " outDropLo=" + _outDropLo.ToString(CultureInfo.InvariantCulture));
+            }
 
-            var monitorJson = MiniJson.BuildMonitor(
-                now.ToString("o", CultureInfo.InvariantCulture),
+            string sendTsUtc = now.ToString("o", CultureInfo.InvariantCulture);
+            long seq = Interlocked.Increment(ref _barSeq);
+            var monitorJson = MiniJson.BuildMonitorV2(
+                BotId,
+                seq,
+                sendTsUtc,
                 mode,
                 wsState,
                 State.ToString(),
-                sendIndex,
+                Math.Max(0, _outHiDepth),
+                Math.Max(0, _outLoDepth),
+                _outDropLo,
                 observedUtc,
                 sentUtc,
                 wsUtc,
@@ -507,9 +584,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 sentAge,
                 wsAge,
                 _barSendCount,
-                _barSkipCount
+                _barSkipCount,
+                EnableLiveExecution,
+                IsInStrategyAnalyzer
             );
-            SendWsTextSafe(monitorJson);
+            EnqueueHigh(monitorJson);
         }
 
         private string FormatAgeSeconds(DateTime utc)
@@ -539,14 +618,20 @@ namespace NinjaTrader.NinjaScript.Strategies
                             {
                                 _ws.Options.SetRequestHeader("X-API-Key", ApiKey);
                             }
+                            try { _ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(15); } catch { }
                             
                             if (EnableLogging) Print("Connecting to WebSocket: " + url);
                             await _ws.ConnectAsync(url, ct).ConfigureAwait(false);
                             if (EnableLogging) Print("WebSocket connected.");
                             _wsReconnectAttempt = 0;
-                            
-                            // Receive loop
+
+                            // Start a single send loop for this connection (no per-message Task.Run).
+                            var sendTask = SendLoop(_ws, ct);
+
+                            // Receive loop blocks until server closes.
                             await ReceiveLoop(_ws, ct);
+
+                            try { await sendTask.ConfigureAwait(false); } catch { }
                         }
                     }
                     catch (WebSocketException wsex)
@@ -738,37 +823,87 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (string.IsNullOrWhiteSpace(id)) return;
 
             var ts = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-            var json = MiniJson.BuildAck(id, status, message ?? "", ts, cmd);
-            SendWsTextSafe(json);
+            long seq = Interlocked.Increment(ref _barSeq);
+            var json = MiniJson.BuildAckV2(BotId, seq, id, status, message ?? "", ts, cmd);
+            EnqueueHigh(json);
         }
-        
-        private void SendBarOverWs(int barsInProgress)
+
+        private DateTime ToUtcBarTime(int bip, DateTime barTime)
+        {
+            try
+            {
+                if (barTime.Kind == DateTimeKind.Utc) return barTime;
+                if (barTime.Kind == DateTimeKind.Local) return barTime.ToUniversalTime();
+
+                TimeZoneInfo tz = null;
+                try { tz = BarsArray[bip].TradingHours.TimeZoneInfo; } catch { tz = null; }
+                if (tz != null)
+                    return TimeZoneInfo.ConvertTimeToUtc(barTime, tz);
+            }
+            catch { }
+
+            try { return DateTime.SpecifyKind(barTime, DateTimeKind.Local).ToUniversalTime(); } catch { }
+            return DateTime.UtcNow;
+        }
+
+        private string TimeframeTag(int bip)
+        {
+            if (!string.IsNullOrWhiteSpace(ForceTimeframeText))
+                return ForceTimeframeText.Trim();
+
+            try
+            {
+                var p = BarsArray[bip].BarsPeriod;
+                if (p.BarsPeriodType == BarsPeriodType.Second) return p.Value.ToString(CultureInfo.InvariantCulture) + "s";
+                if (p.BarsPeriodType == BarsPeriodType.Minute) return p.Value.ToString(CultureInfo.InvariantCulture) + "m";
+                if (p.BarsPeriodType == BarsPeriodType.Day) return p.Value.ToString(CultureInfo.InvariantCulture) + "d";
+            }
+            catch { }
+
+            return "1m";
+        }
+
+        private void SendBarOverWs(int barsInProgress, int barsAgo)
         {
             string sym = !string.IsNullOrWhiteSpace(ForceSymbol) ? ForceSymbol.Trim() : NormalizeSymbol();
-            string timeframe = !string.IsNullOrWhiteSpace(ForceTimeframeText)
-                ? ForceTimeframeText.Trim()
-                : NormalizeTimeframe(barsInProgress);
+            string timeframe = TimeframeTag(barsInProgress);
 
-            var json = MiniJson.BuildBar(
-                Times[barsInProgress][0].ToString("o", CultureInfo.InvariantCulture),
+            DateTime raw = Times[barsInProgress][barsAgo];
+            string barTsUtc = ToUtcBarTime(barsInProgress, raw).ToString("o", CultureInfo.InvariantCulture);
+
+            long vol = 0L;
+            try { vol = Math.Max(0L, (long)Volumes[barsInProgress][barsAgo]); } catch { vol = 0L; }
+
+            string sendTsUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+            long seq = Interlocked.Increment(ref _barSeq);
+
+            var json = MiniJson.BuildBarDataV2(
+                BotId,
+                seq,
+                sendTsUtc,
+                barTsUtc,
                 sym,
                 timeframe,
-                Opens[barsInProgress][0],
-                Highs[barsInProgress][0],
-                Lows[barsInProgress][0],
-                Closes[barsInProgress][0],
-                (int)Volumes[barsInProgress][0],
-                CurrentMode()
+                Opens[barsInProgress][barsAgo],
+                Highs[barsInProgress][barsAgo],
+                Lows[barsInProgress][barsAgo],
+                Closes[barsInProgress][barsAgo],
+                vol,
+                CurrentMode(),
+                EnableLiveExecution,
+                IsInStrategyAnalyzer,
+                barsInProgress
             );
+
             _lastBarSentUtc = DateTime.UtcNow;
             Interlocked.Increment(ref _barSendCount);
-            SendWsTextSafe(json);
+            EnqueueLow(json);
 
             if (EnableLogging)
             {
                 long n = Interlocked.Increment(ref _barSeq);
-                if (n % 30 == 0)
-                    Print($"Bar sent OK via WS: {sym} {timeframe} c={Closes[barsInProgress][0]:F2}");
+                if (n % 60 == 0)
+                    Print($"Bar sent OK via WS: {sym} {timeframe} c={Closes[barsInProgress][barsAgo]:F2} dropLo={_outDropLo}");
             }
         }
 
@@ -802,35 +937,83 @@ namespace NinjaTrader.NinjaScript.Strategies
             return $"{message} | latencyMs={ms:0}";
         }
         
-        private void SendWsTextSafe(string json)
+        private void EnqueueHigh(string json)
         {
-            if (_ws == null || _ws.State != WebSocketState.Open || _cts == null || _cts.IsCancellationRequested) return;
-
-            var ws = _ws;
-            var ct = _cts.Token;
-
-            Task.Run(async () =>
+            if (string.IsNullOrWhiteSpace(json)) return;
+            if (Interlocked.Increment(ref _outHiDepth) > MAX_OUT_HI)
             {
-                bool locked = false;
+                Interlocked.Decrement(ref _outHiDepth);
+                return;
+            }
+            _outHi.Enqueue(json);
+            _outSignal.Release();
+        }
+
+        private void EnqueueLow(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return;
+
+            // If disconnected, drop low-priority bars immediately (anti-hang).
+            if (_ws == null || _ws.State != WebSocketState.Open)
+            {
+                Interlocked.Increment(ref _outDropLo);
+                return;
+            }
+
+            if (Interlocked.Increment(ref _outLoDepth) > MAX_OUT_LO)
+            {
+                Interlocked.Decrement(ref _outLoDepth);
+                Interlocked.Increment(ref _outDropLo);
+                return;
+            }
+            _outLo.Enqueue(json);
+            _outSignal.Release();
+        }
+
+        private async Task SendLoop(ClientWebSocket ws, CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested && ws != null)
+            {
                 try
                 {
-                    await _wsSendLock.WaitAsync(ct).ConfigureAwait(false);
-                    locked = true;
-                    if (!ReferenceEquals(ws, _ws) || ws == null || ws.State != WebSocketState.Open) return;
-                    var bytes = Encoding.UTF8.GetBytes(json);
-                    await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
-                    _lastWsSendUtc = DateTime.UtcNow;
+                    await _outSignal.WaitAsync(SEND_LOOP_IDLE_MS, ct).ConfigureAwait(false);
+
+                    if (ct.IsCancellationRequested) break;
+                    if (!ReferenceEquals(ws, _ws)) break;
+                    if (ws.State != WebSocketState.Open) continue;
+
+                    if (_outHi.TryDequeue(out var hi))
+                    {
+                        Interlocked.Decrement(ref _outHiDepth);
+                        await SendText(ws, hi, ct).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (_outLo.TryDequeue(out var lo))
+                    {
+                        Interlocked.Decrement(ref _outLoDepth);
+                        await SendText(ws, lo, ct).ConfigureAwait(false);
+                        continue;
+                    }
                 }
-                catch (Exception ex)
+                catch (TaskCanceledException) { break; }
+                catch
                 {
-                    if (EnableLogging) Print("SendWsTextSafe error: " + ex.Message);
+                    try { await Task.Delay(100, ct).ConfigureAwait(false); } catch { }
                 }
-                finally
-                {
-                    if (locked)
-                        _wsSendLock.Release();
-                }
-            });
+            }
+        }
+
+        private async Task SendText(ClientWebSocket ws, string json, CancellationToken ct)
+        {
+            try
+            {
+                if (ws == null || ws.State != WebSocketState.Open) return;
+                var bytes = Encoding.UTF8.GetBytes(json);
+                await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+                _lastWsSendUtc = DateTime.UtcNow;
+            }
+            catch { }
         }
 
         private string NormalizeSymbol()
@@ -971,6 +1154,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty]
         [Display(Name = "Enable LIVE Execution", Order = 4, GroupName = "Bridge")]
         public bool EnableLiveExecution { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Send Only Closed Bars", Order = 5, GroupName = "Bridge")]
+        public bool SendOnlyClosedBars { get; set; }
 
         [NinjaScriptProperty]
         [Range(1, 200)]

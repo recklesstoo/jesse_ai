@@ -107,7 +107,53 @@ The Advanced AI Assistant is a read-only operator. It can summarize health, diag
 - Ops chat (tools + local-doc RAG): `POST http://127.0.0.1:8000/api/v1/assistant/chat` body `{ "botId":"bot-1", "message":"...", "opsMode": true, "includeWeb": false, "sessionId":"optional" }`
   - `opsMode=true` enables read-only tool calls to real endpoints (`/state`, `/monitor/status`, `/execution/status`, `/swarm/rank`, `/events`, `/data/summary`).
   - `includeWeb=true` allows optional web search results (if configured) and they are labeled as WEB sources.
-  - Market metrics (Wyckoff/trend/FVG, deterministic): `GET http://127.0.0.1:8000/api/v1/market/metrics?symbol=MNQ&timeframe=1m&lookback=500&mode=summary`
+  - Market metrics (Wyckoff/trend/FVG, deterministic): `GET http://127.0.0.1:8000/api/v1/market/metrics?symbol=MNQ&timeframe=1m&lookback=500&mode=summary` (returns `feed_status` in `LIVE|STALE|NO_LIVE` + freshness thresholds/ages)
+
+### Market Metrics v1 (source-of-truth)
+
+Core rule (anti-invention):
+- If `feed_status` in `{STALE, NO_LIVE}` OR platform is not `data_source=LIVE_WS` + `feed_status=LIVE`:
+  - `confidence` MUST be `low`
+  - `notes[]` MUST include numeric freshness evidence (`ws_age_sec`, `bar_age_sec`, thresholds)
+  - Assistant MUST NOT make strong conclusions (trend/signal) without fresh data
+
+Endpoint contract (stable):
+- `GET /api/v1/market/metrics?symbol=MNQ&timeframe=1m|5m&lookback=500&mode=summary|full`
+- Always returns:
+  - `server_ts_utc`, `last_ws_ts_utc`, `last_bar_ts_utc`
+  - `ws_age_sec`, `bar_age_sec`
+  - `ws_stale_sec=10`
+  - `bar_stale_sec=90` for `1m`, `450` for `5m`
+  - `feed_status` in `LIVE|STALE|NO_LIVE`
+  - `confidence` + `notes[]` (numeric freshness explanation when stale/no-live)
+
+Implemented locations:
+- Metrics engine: `backend/market/metrics.py`
+- Endpoint coherence/anti-invention enforcement: `backend/routers/market.py`
+- Assistant guardrails (system prompt + snapshot): `backend/assistant/chat.py`
+- Tests: `backend/tests/test_market_metrics.py`, `backend/tests/smoke_market_metrics.py`
+
+Definition of done:
+- Live feed: metrics returns `feed_status=LIVE` + `confidence=high`
+- Stop Ninja feed: returns `STALE/NO_LIVE` + `confidence=low` + `notes[]` numeric freshness evidence
+- Assistant uses the metrics snapshot; if stale/no-live it says so and does not assert
+
+### Training pipeline (deterministic, no execution)
+
+The training pipeline trains models from stored `data_bars` (SQLite) and writes artifacts under `models/` (ignored by Git).
+It never flips execution toggles and never sends orders.
+
+Endpoints:
+- Start training: `POST http://127.0.0.1:8000/api/v1/bots/train`
+- Training status: `GET http://127.0.0.1:8000/api/v1/bots/train/status?botId=bot-1`
+- Model registry (DONE runs): `GET http://127.0.0.1:8000/api/v1/bots/models?botId=bot-1`
+- Latest model: `GET http://127.0.0.1:8000/api/v1/bots/models/latest?botId=bot-1&symbol=MNQ&timeframe=1m`
+
+Guardrails:
+- Refuses training if real `data_bars` is `< 10k` bars per timeframe (returns status `REFUSED` with explanation).
+
+PowerShell helper:
+- `.\scripts\train_bot.ps1 -BotId bot-1 -Symbol MNQ -Timeframes 1m,5m -LookbackDays 60`
 
 OpenAI ChatGPT configuration (no local LLM):
 - `OPENAI_API_KEY` (required)

@@ -155,7 +155,7 @@ export default function AIAssistantPanel({ botId }) {
         </button>
       </div>
 
-      <div className="list" style={{ marginTop: 10, maxHeight: 260, overflow: "auto" }}>
+      <div className="list ai-assistant-chat" style={{ marginTop: 10 }}>
         {chat.length === 0 && <div className="muted">No messages yet.</div>}
         {chat.slice(-30).map((row, idx) => (
           <div key={idx} className="list-item" style={{ whiteSpace: "pre-wrap", flexDirection: "column", alignItems: "stretch" }}>

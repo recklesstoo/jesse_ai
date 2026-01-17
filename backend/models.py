@@ -176,3 +176,63 @@ class AssistantSession(Base):
     provider = Column(String, default="openai", index=True)
     turns = Column(JSON)  # list[{role, content}]
     updated_at_utc = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, index=True)
+
+
+class ModelRun(Base):
+    __tablename__ = "model_runs"
+
+    id = Column(String, primary_key=True)
+    bot_id = Column(String, index=True)
+    symbol = Column(String, index=True)
+    timeframe = Column(String, index=True)
+    started_at_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
+    finished_at_utc = Column(DateTime(timezone=True), nullable=True, index=True)
+    status = Column(String, default="RUNNING", index=True)  # RUNNING, DONE, ERROR, REFUSED
+    metrics = Column(JSON)
+    train_config = Column(JSON)
+    artifact_path = Column(String)
+    error = Column(String)
+
+    __table_args__ = (Index("idx_model_runs_key", "bot_id", "symbol", "timeframe", "started_at_utc"),)
+
+
+class BotSpec(Base):
+    __tablename__ = "bot_specs"
+
+    bot_id = Column(String, primary_key=True)
+    created_at_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at_utc = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, index=True)
+    spec_version = Column(String, default="bot-spec.v1", index=True)
+    spec = Column(JSON)
+
+
+class BacktestRun(Base):
+    __tablename__ = "backtest_runs"
+
+    id = Column(String, primary_key=True)  # runId
+    bot_id = Column(String, index=True)
+    created_at_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
+    started_at_utc = Column(DateTime(timezone=True), nullable=True, index=True)
+    finished_at_utc = Column(DateTime(timezone=True), nullable=True, index=True)
+    status = Column(String, default="RUNNING", index=True)  # RUNNING, DONE, ERROR
+    params = Column(JSON)
+    metrics = Column(JSON)
+    error = Column(String)
+
+    __table_args__ = (Index("idx_backtest_runs_key", "bot_id", "created_at_utc"),)
+
+
+class OptimizeRun(Base):
+    __tablename__ = "optimize_runs"
+
+    id = Column(String, primary_key=True)  # runId
+    bot_id = Column(String, index=True)
+    created_at_utc = Column(DateTime(timezone=True), default=utc_now, index=True)
+    started_at_utc = Column(DateTime(timezone=True), nullable=True, index=True)
+    finished_at_utc = Column(DateTime(timezone=True), nullable=True, index=True)
+    status = Column(String, default="RUNNING", index=True)  # RUNNING, DONE, ERROR
+    params = Column(JSON)
+    results = Column(JSON)  # list summaries per variant (capped)
+    error = Column(String)
+
+    __table_args__ = (Index("idx_optimize_runs_key", "bot_id", "created_at_utc"),)

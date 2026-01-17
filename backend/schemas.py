@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Dict, Any, Optional
 
 # Reutilizamos los esquemas existentes del app.py original y añadimos nuevos
@@ -38,11 +38,8 @@ class AISignalOut(BaseModel):
 
 class WyckoffConfigIn(BaseModel):
     botId: Optional[str] = None
-    # Permite campos dinámicos
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 class AutoConfigIn(BaseModel):
     botId: Optional[str] = None
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")

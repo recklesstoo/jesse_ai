@@ -45,6 +45,18 @@ def _call_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, A
     return data
 
 
+def _call_post(path: str, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    client = TestClient(_get_app())
+    res = client.post(path, json=json_body or {})
+    try:
+        data = res.json()
+    except Exception:
+        data = {"ok": False, "error": "non_json", "status_code": res.status_code, "text": res.text}
+    data.setdefault("_meta", {})["endpoint"] = path
+    data["_meta"]["status_code"] = res.status_code
+    return data
+
+
 def tool_list_bots(_: Dict[str, Any]) -> ToolResult:
     return ToolResult(
         name="tool_list_bots",
@@ -110,6 +122,81 @@ def tool_get_market_metrics(params: Dict[str, Any]) -> ToolResult:
         ok=True,
         data=_call_get("/api/v1/market/metrics", params=q),
         citations=[{"type": "endpoint", "path": "/api/v1/market/metrics", "params": q}],
+    )
+
+
+def tool_create_bot(params: Dict[str, Any]) -> ToolResult:
+    spec = params.get("spec") or params.get("botSpec") or params
+    if not isinstance(spec, dict):
+        return ToolResult(name="tool_create_bot", ok=False, data={"error": "spec must be an object"}, citations=[])
+    data = _call_post("/api/v1/bots", json_body=spec)
+    return ToolResult(
+        name="tool_create_bot",
+        ok=bool(data.get("ok")),
+        data=data,
+        citations=[{"type": "endpoint", "path": "/api/v1/bots"}],
+    )
+
+
+def tool_run_backtest(params: Dict[str, Any]) -> ToolResult:
+    bot_id = params.get("botId") or params.get("bot_id") or "bot-1"
+    start_day = params.get("startDay") or params.get("start_day")
+    end_day = params.get("endDay") or params.get("end_day")
+    body = {"botId": bot_id, "startDay": start_day, "endDay": end_day}
+    data = _call_post("/api/v1/backtest/run", json_body=body)
+    return ToolResult(
+        name="tool_run_backtest",
+        ok=bool(data.get("ok")),
+        data=data,
+        citations=[{"type": "endpoint", "path": "/api/v1/backtest/run"}],
+    )
+
+
+def tool_get_backtest_results(params: Dict[str, Any]) -> ToolResult:
+    run_id = params.get("runId") or params.get("run_id") or ""
+    data = _call_get(f"/api/v1/backtest/results/{run_id}")
+    return ToolResult(
+        name="tool_get_backtest_results",
+        ok=bool(data.get("ok")),
+        data=data,
+        citations=[{"type": "endpoint", "path": f"/api/v1/backtest/results/{run_id}"}],
+    )
+
+
+def tool_run_optimize(params: Dict[str, Any]) -> ToolResult:
+    bot_id = params.get("botId") or params.get("bot_id") or "bot-1"
+    start_day = params.get("startDay") or params.get("start_day")
+    end_day = params.get("endDay") or params.get("end_day")
+    grid = params.get("grid") or {}
+    body = {"botId": bot_id, "startDay": start_day, "endDay": end_day, "grid": grid}
+    data = _call_post("/api/v1/optimize/run", json_body=body)
+    return ToolResult(
+        name="tool_run_optimize",
+        ok=bool(data.get("ok")),
+        data=data,
+        citations=[{"type": "endpoint", "path": "/api/v1/optimize/run"}],
+    )
+
+
+def tool_get_optimize_results(params: Dict[str, Any]) -> ToolResult:
+    run_id = params.get("runId") or params.get("run_id") or ""
+    data = _call_get(f"/api/v1/optimize/results/{run_id}")
+    return ToolResult(
+        name="tool_get_optimize_results",
+        ok=bool(data.get("ok")),
+        data=data,
+        citations=[{"type": "endpoint", "path": f"/api/v1/optimize/results/{run_id}"}],
+    )
+
+
+def tool_get_perf_summary(params: Dict[str, Any]) -> ToolResult:
+    bot_id = params.get("botId") or params.get("bot_id") or "bot-1"
+    data = _call_get("/api/v1/perf/summary", params={"botId": bot_id})
+    return ToolResult(
+        name="tool_get_perf_summary",
+        ok=bool(data.get("ok")),
+        data=data,
+        citations=[{"type": "endpoint", "path": "/api/v1/perf/summary", "params": {"botId": bot_id}}],
     )
 
 def tool_get_status(params: Dict[str, Any]) -> ToolResult:
@@ -289,6 +376,12 @@ def build_tool_registry(doc_index: DocIndex) -> Dict[str, ToolFn]:
         "tool_swarm_rank": tool_swarm_rank,
         "tool_get_data_summary": tool_get_data_summary,
         "tool_get_market_metrics": tool_get_market_metrics,
+        "tool_create_bot": tool_create_bot,
+        "tool_run_backtest": tool_run_backtest,
+        "tool_get_backtest_results": tool_get_backtest_results,
+        "tool_run_optimize": tool_run_optimize,
+        "tool_get_optimize_results": tool_get_optimize_results,
+        "tool_get_perf_summary": tool_get_perf_summary,
         "tool_get_recent_events": tool_get_recent_events,
         "tool_get_recent_bars": tool_get_recent_bars,
         "tool_get_recent_trades": tool_get_recent_trades,

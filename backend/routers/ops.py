@@ -30,6 +30,7 @@ from backend.state import _get_bot_state, compute_feed_status, state_lock
 from backend.assistant.chat import get_openai_assistant
 from backend.assistant.chat import build_ops_snapshot
 from backend.assistant.chat import rate_limit_check
+from backend.contracts.assistant_chat import AssistantChatRequest, AssistantChatResponse
 from pathlib import Path
 
 router = APIRouter()
@@ -227,13 +228,13 @@ async def swarm_plan(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.post("/api/v1/assistant/chat")
-async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def assistant_chat(payload: AssistantChatRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
     """
     Conversational ops assistant (read-only). Uses tools + local-doc RAG and never sends orders.
     """
-    bot_id = payload.get("botId") or "bot-1"
-    message = (payload.get("message") or "").strip()
-    include_web = bool(payload.get("includeWeb") or False)
+    bot_id = payload.bot_id or "bot-1"
+    message = (payload.message or "").strip()
+    include_web = bool(payload.include_web or False)
     request_id = f"asst_{secrets.token_hex(6)}"
     t0 = time.time()
     if include_web:
@@ -241,8 +242,8 @@ async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db))
         pass
 
     # New assistant pipeline (keep legacy fallback code below for safety).
-    ops_mode = bool(payload.get("opsMode") if "opsMode" in payload else True)
-    session_id = payload.get("sessionId")
+    ops_mode = bool(payload.ops_mode)
+    session_id = payload.session_id
 
     # Rate limit by session_id or bot_id (best-effort).
     rl_key = str(session_id or f"anon:{bot_id}")
@@ -256,7 +257,7 @@ async def assistant_chat(payload: Dict[str, Any], db: Session = Depends(get_db))
     # Optional protection: require a token to enable opsMode tools from the dashboard.
     required = (os.getenv("WYCKOFF_AI_OPS_TOKEN") or "").strip()
     if required:
-        provided = str(payload.get("opsToken") or "").strip()
+        provided = str(payload.ops_token or "").strip()
         if ops_mode and provided != required:
             ops_mode = False
             message = (

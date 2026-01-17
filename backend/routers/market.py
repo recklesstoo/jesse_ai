@@ -52,6 +52,8 @@ from backend.state import (
 )
 from backend.market.buffer import market_buffer
 from backend.market.metrics import compute_market_metrics_v1
+from backend.contracts.bot_state_v1 import BotStateV1
+from backend.contracts.market_metrics_v1 import MarketMetricsV1
 
 router = APIRouter()
 
@@ -282,7 +284,13 @@ async def api_state(botId: str = Query("bot-1", alias="botId")) -> Dict[str, Any
     async with state_lock:
         feed = compute_feed_status(botId)
         snapshot = dict(_get_bot_state(botId))
-    return {"ok": True, **feed, "state": snapshot}
+    # Backward-compatible snapshot keys for UI/tools (avoid connected/ws_connected drift).
+    snapshot.setdefault("ws_connected", bool(snapshot.get("connected")))
+    snapshot.setdefault("transport_connected", bool(snapshot.get("connected")))
+    snapshot.setdefault("ws_open", bool(snapshot.get("connected")))
+
+    payload = {"ok": True, **feed, "state": snapshot}
+    return BotStateV1.model_validate(payload).model_dump(by_alias=True)
 
 
 @router.get("/api/v1/signals/latest")
@@ -588,22 +596,27 @@ async def market_metrics(
         computed = compute_feed_status(bot_id)
         st = dict(_get_bot_state(bot_id))
 
-    last_seen = st.get("last_seen_utc") or st.get("last_ws_rx_utc")
-    last_ws_ts_utc: Optional[str] = None
-    ws_age_sec: Optional[float] = None
-    try:
-        if last_seen:
-            s = str(last_seen)
-            if s.endswith("Z"):
-                s = s.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            dt = dt.astimezone(timezone.utc)
-            last_ws_ts_utc = dt.isoformat().replace("+00:00", "Z")
-            ws_age_sec = float(max(0.0, (now - dt).total_seconds()))
-    except Exception:
-        ws_age_sec = None
+    def _to_z(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        s = str(value).strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            return s
+        if s.endswith("+00:00"):
+            return s.replace("+00:00", "Z")
+        return s
+
+    last_ws_ts_utc: Optional[str] = _to_z(computed.get("last_seen_utc") or computed.get("last_ws_rx_utc") or st.get("last_seen_utc"))
+    ws_age_sec: Optional[float] = computed.get("ws_age_sec")
+
+    last_rx = market_buffer.last_rx_ts(symbol=symbol, timeframe=tf)
+    bar_age_sec: Optional[float] = None
+    if last_rx is not None:
+        bar_age_sec = float(max(0.0, (now - last_rx).total_seconds()))
+    else:
+        bar_age_sec = computed.get("bar_age_sec")
 
     bars = market_buffer.get_bars(symbol=symbol, timeframe=tf, limit=lookback)
     resp, notes = compute_market_metrics_v1(
@@ -611,11 +624,23 @@ async def market_metrics(
         symbol=symbol.upper(),
         timeframe=tf,
         ws_age_sec=ws_age_sec,
+        bar_age_sec_override=bar_age_sec,
         last_ws_ts_utc=last_ws_ts_utc,
         ws_stale_sec=10.0,
         lookback=lookback,
         mode=mode,
     )
+
+    def _freshness_note() -> str:
+        ws_age_s = "null" if resp.get("ws_age_sec") is None else f"{float(resp.get('ws_age_sec')):.3f}"
+        bar_age_s = "null" if resp.get("bar_age_sec") is None else f"{float(resp.get('bar_age_sec')):.3f}"
+        return (
+            "freshness:"
+            f" ws_age_sec={ws_age_s}"
+            f" bar_age_sec={bar_age_s}"
+            f" ws_stale_sec={float(resp.get('ws_stale_sec') or 10.0):.3f}"
+            f" bar_stale_sec={float(resp.get('bar_stale_sec') or 0.0):.3f}"
+        )
 
     # Coherence with platform truth (anti-invention):
     data_source = (computed.get("data_source") or "UNKNOWN").upper()
@@ -624,14 +649,23 @@ async def market_metrics(
         resp["feed_status"] = "NO_LIVE"
         resp["confidence"] = "low"
         notes.append(f"non-live data_source={data_source}")
+        notes.append(_freshness_note())
     else:
         resp["source"] = "LIVE_WS"
 
     if (computed.get("feed_status") or "").upper() != "LIVE":
-        if resp.get("feed_status") == "OK":
+        platform_fs = (computed.get("feed_status") or "").upper()
+        if platform_fs == "NO_LIVE":
+            resp["feed_status"] = "NO_LIVE"
+        elif resp.get("feed_status") == "LIVE":
             resp["feed_status"] = "STALE"
         resp["confidence"] = "low"
         notes.append(f"platform feed_status={computed.get('feed_status')}")
+        notes.append(_freshness_note())
+
+    if resp.get("source") != "LIVE_WS" or resp.get("feed_status") in {"STALE", "NO_LIVE"}:
+        resp["confidence"] = "low"
+        notes.append(_freshness_note())
 
     resp["notes"] = list(dict.fromkeys(notes))
-    return resp
+    return MarketMetricsV1.model_validate(resp).model_dump()
